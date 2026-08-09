@@ -162,11 +162,12 @@ function assign(points: Point[], forecast: Forecast) {
   // Titulares remain in their original MT FINAL. Suplentes are then allocated globally to the closest eligible daily group.
   const groups = Object.entries(forecast).flatMap(([mt, daily]) => Object.keys(daily).map(Number).flatMap((day) => {
     const titulars = next.filter((point) => point.kind === "Titular" && point.assignedMt === mt && point.day === day);
-    return titulars.length ? [{ mt, day, titulars, desired: titulars.length * 3, assigned: [] as Point[] }] : [];
+    return titulars.length ? [{ mt, day, titulars, desired: titulars.length * 3, assigned: [] as Point[], hasNearby: false }] : [];
   }));
   const edges = next.filter((point) => point.kind === "Suplente").flatMap((point) => groups.flatMap((group) => {
     const distance = Math.min(...group.titulars.map((title) => meters(point, title)));
-    return distance <= MAX_SUPPLEMENT_DISTANCE_METERS ? [{ point, group, distance }] : [];
+    if (distance <= MAX_SUPPLEMENT_DISTANCE_METERS) { group.hasNearby = true; return [{ point, group, distance }]; }
+    return [];
   })).sort((a, b) => priority(a.point) - priority(b.point) || a.distance - b.distance);
   const usedSpares = new Set<string>();
   edges.forEach(({ point, group }) => {
@@ -176,8 +177,15 @@ function assign(points: Point[], forecast: Forecast) {
     group.assigned.push(point);
     usedSpares.add(point.id);
   });
+  const allSpares = next.filter((point) => point.kind === "Suplente");
+  groups.filter((group) => !group.hasNearby && group.assigned.length < group.desired).forEach((group) => {
+    const fallback = allSpares.filter((point) => !usedSpares.has(point.id)).map((point) => ({ point, distance: Math.min(...group.titulars.map((title) => meters(point, title))) }))
+      .sort((a, b) => a.distance - b.distance || priority(a.point) - priority(b.point)).slice(0, group.desired - group.assigned.length);
+    fallback.forEach(({ point }) => { point.day = group.day; point.assignedMt = group.mt; group.assigned.push(point); usedSpares.add(point.id); });
+    if (fallback.length) notices.push({ type: "info", text: `${group.mt}, día ${group.day}: no había suplentes a 15 km; se asignaron los ${fallback.length} más cercanos disponibles.` });
+  });
   groups.forEach((group) => {
-    if (group.assigned.length < group.desired) notices.push({ type: "warn", text: `${group.mt}, día ${group.day}: ${group.assigned.length}/${group.desired} suplentes dentro de 15 km de los titulares.` });
+    if (group.assigned.length < group.desired) notices.push({ type: "warn", text: `${group.mt}, día ${group.day}: ${group.assigned.length}/${group.desired} suplentes disponibles.` });
   });
   return { points: refreshAverages(next), notices };
 }
