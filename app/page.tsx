@@ -111,16 +111,15 @@ function assign(points: Point[], forecast: Forecast) {
     const needed = days.reduce((sum, x) => sum + x.count, 0);
     if (!all.length) { notices.push({ type: "warn", text: `${mt}: no hay puntos con coordenadas en la base.` }); return; }
     if (titles.length < needed) notices.push({ type: "warn", text: `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
+    // Density is calculated once per MT to keep large bases responsive in the browser.
+    const density = new Map(titles.map((point) => [point.id, titles.filter((x) => x.id !== point.id)
+      .map((x) => meters(point, x)).sort((a, b) => a - b).slice(0, 4).reduce((sum, d) => sum + d, 0)]));
     let available = [...titles];
     days.forEach(({ day, count }) => {
       if (!available.length) return;
       const take = Math.min(count, available.length);
       // Seed where the remaining local density is greatest, then tighten around its centroid.
-      const seed = [...available].sort((a, b) => {
-        const da = available.filter((x) => x.id !== a.id).sort((x, y) => meters(a, x) - meters(a, y)).slice(0, 4).reduce((s, x) => s + meters(a, x), 0);
-        const db = available.filter((x) => x.id !== b.id).sort((x, y) => meters(b, x) - meters(b, y)).slice(0, 4).reduce((s, x) => s + meters(b, x), 0);
-        return da - db;
-      })[0];
+      const seed = [...available].sort((a, b) => (density.get(a.id) ?? 0) - (density.get(b.id) ?? 0))[0];
       let group = [...available].sort((a, b) => meters(seed, a) - meters(seed, b)).slice(0, take);
       for (let i = 0; i < 3 && group.length > 1; i++) {
         const c = centroid(group);
