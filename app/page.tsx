@@ -9,6 +9,8 @@ const GeoMap = dynamic(() => import("./GeoMap"), { ssr: false });
 type Raw = Record<string, unknown>;
 type Point = {
   id: string;
+  refId: string;
+  name: string;
   row: Raw;
   mt: string;
   selection: string;
@@ -52,26 +54,47 @@ const column = (rows: Raw[], names: string[]) => {
 };
 const operationalMt = (point: Point) => point.assignedMt ?? point.mt;
 
+function baseColumns(rows: Raw[]) {
+  if (!rows.length) throw new Error("La base de puntos no contiene registros.");
+  const columns = {
+    mt: column(rows, ["MTFINAL"]),
+    selection: column(rows, ["SELECCION", "SELECCIONPUNTO"]),
+    latitude: column(rows, ["LATITUDE", "LATITUD", "LAT"]),
+    longitude: column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG"]),
+    pdv: column(rows, ["PDV"]),
+    refId: column(rows, ["REFID"]),
+  };
+  const labels: Record<keyof typeof columns, string> = { mt: "MT FINAL", selection: "SELECCION", latitude: "LATITUD", longitude: "LONGITUD", pdv: "PDV", refId: "RefID" };
+  const missing = (Object.keys(columns) as Array<keyof typeof columns>).find((name) => !columns[name]);
+  if (missing) throw new Error(`No se encontró la columna "${labels[missing]}" en la base de puntos.`);
+  return columns as Record<keyof typeof columns, string>;
+}
+
+function forecastMtColumn(rows: Raw[]) {
+  if (!rows.length) throw new Error("El forecast no contiene registros.");
+  const mt = column(rows, ["MTFINAL"]);
+  if (!mt) throw new Error("No se encontró la columna \"MT FINAL\" en el forecast.");
+  const days = Object.keys(rows[0]).filter((header) => Number.isInteger(Number(header)) && Number(header) > 0);
+  if (!days.length) throw new Error("No se encontraron columnas de días numéricos en el forecast.");
+  return mt;
+}
+
 function extractPoints(rows: Raw[]) {
-  const mtCol = column(rows, ["MTFINAL"]);
-  const selectionCol = column(rows, ["SELECCION", "SELECCIONPUNTO"]);
-  const latCol = column(rows, ["LATITUDE", "LATITUD", "LAT"]);
-  const lngCol = column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG"]);
-  if (!mtCol || !selectionCol || !latCol || !lngCol) throw new Error("La base debe incluir MT FINAL, SELECCION, LATITUDE y LONGITUDE.");
-  const provisional = rows.map((row, index) => ({ row, index, lat: asNumber(row[latCol]), lng: asNumber(row[lngCol]) }));
+  const fields = baseColumns(rows);
+  const provisional = rows.map((row, index) => ({ row, index, lat: asNumber(row[fields.latitude]), lng: asNumber(row[fields.longitude]) }));
   const likelySwapped = provisional.filter((p) => p.lat !== null && p.lng !== null).filter((p) => Math.abs(p.lat!) > 60 && Math.abs(p.lng!) < 60).length > provisional.length * 0.55;
   return provisional.flatMap(({ row, index, lat, lng }) => {
     if (lat === null || lng === null) return [];
-    const selection = norm(row[selectionCol]);
-    return [{ id: String(row["RefID"] ?? row["REFID"] ?? index + 1) + "-" + index, row, mt: String(row[mtCol] ?? "").trim(), selection,
+    const selection = norm(row[fields.selection]);
+    const refId = String(row[fields.refId] ?? index + 1);
+    return [{ id: refId + "-" + index, refId, name: String(row[fields.pdv] ?? refId), row, mt: String(row[fields.mt] ?? "").trim(), selection,
       kind: selection === "T" ? "Titular" : selection.startsWith("S") ? "Suplente" : "Otro",
       lat: likelySwapped ? lng : lat, lng: likelySwapped ? lat : lng, day: null, assignedMt: null, avgMeters: null }];
   });
 }
 
 function extractForecast(rows: Raw[]) {
-  const mtCol = column(rows, ["MTFINAL"]);
-  if (!mtCol) throw new Error("El forecast debe tener una columna MT FINAL.");
+  const mtCol = forecastMtColumn(rows);
   const result: Forecast = {};
   rows.forEach((row) => {
     const mt = String(row[mtCol] ?? "").trim();
@@ -177,8 +200,8 @@ export default function Home() {
   const [error, setError] = useState("");
   const handleFile = async (event: ChangeEvent<HTMLInputElement>, type: "base" | "forecast") => {
     const file = event.target.files?.[0]; if (!file) return;
-    try { const rows = await readFile(file); type === "base" ? setBase(rows) : setForecast(extractForecast(rows)); setError(""); }
-    catch (e) { setError(e instanceof Error ? e.message : "No se pudo leer el archivo."); }
+    try { const rows = await readFile(file); if (type === "base") { baseColumns(rows); setBase(rows); } else setForecast(extractForecast(rows)); setError(""); }
+    catch (e) { if (type === "base") setBase(null); else setForecast(null); setPoints([]); setNotices([]); setError(e instanceof Error ? e.message : "No se pudo leer el archivo."); }
   };
   const calculate = () => { try { if (!base || !forecast) throw new Error("Carga la base de puntos y el forecast antes de calcular."); const result = assign(extractPoints(base), forecast); setPoints(result.points); setNotices(result.notices); setSelected(null); setPlanningVersion((version) => version + 1); } catch (e) { setError(e instanceof Error ? e.message : "No fue posible calcular la asignación."); } };
   const mts = useMemo(() => Object.keys(forecast ?? {}).sort(), [forecast]);
@@ -195,9 +218,10 @@ export default function Home() {
   const moveSelected = (newDay: number | null) => { if (!selected) return; setPoints((previous) => refreshAverages(previous.map((p) => p.id === selected.id ? { ...p, day: newDay } : p))); setSelected((p) => p ? { ...p, day: newDay } : p); setNotices([{ type: "info", text: "Cambio manual aplicado. Revisa el indicador de forecast antes de exportar." }]); };
   const download = () => {
     if (!base || !points.length) return;
-    const lookup = new Map(points.map((p) => [p.id.split("-").slice(0, -1).join("-"), p]));
+    const lookup = new Map(points.map((p) => [p.refId, p]));
+    const refIdHeader = column(base, ["REFID"]);
     const mtHeader = Object.keys(base[0] ?? {}).find((header) => key(header) === "MTFINAL");
-    const rows = base.map((row, i) => { const ref = String(row["RefID"] ?? row["REFID"] ?? i + 1), p = lookup.get(ref); return { ...row, ...(p?.assignedMt && mtHeader ? { [mtHeader]: p.assignedMt } : {}), DIA: p?.day ?? "", "Promedio metros": p?.avgMeters == null ? "" : Math.round(p.avgMeters) }; });
+    const rows = base.map((row, i) => { const ref = String(row[refIdHeader ?? "RefID"] ?? i + 1), p = lookup.get(ref); return { ...row, ...(p?.assignedMt && mtHeader ? { [mtHeader]: p.assignedMt } : {}), DIA: p?.day ?? "", "Promedio metros": p?.avgMeters == null ? "" : Math.round(p.avgMeters) }; });
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Asignación"); XLSX.writeFile(wb, "BD_PUNTOS_ASIGNADOS.xlsx");
   };
   return <main>
