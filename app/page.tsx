@@ -205,6 +205,7 @@ export default function Home() {
   const [mt, setMt] = useState("all");
   const [mtSearch, setMtSearch] = useState("");
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [openFilter, setOpenFilter] = useState<"mt" | "days" | null>(null);
   const [kind, setKind] = useState("all"); const [selectionFilter, setSelectionFilter] = useState("all");
   const [planningVersion, setPlanningVersion] = useState(0);
   const [selected, setSelected] = useState<Point | null>(null);
@@ -224,16 +225,19 @@ export default function Home() {
     ? [...new Set(points.flatMap((p) => p.day ? [p.day] : []))].sort((a, b) => a - b)
     : Object.keys(forecast?.[mt] ?? {}).map(Number).sort((a, b) => a - b), [points, forecast, mt]);
   const filtered = useMemo(() => points.filter((p) => (mt === "all" || operationalMt(p) === mt) && (!selectedDays.length || (p.day !== null && selectedDays.includes(p.day))) && (kind === "all" || p.kind === kind) && (selectionFilter === "all" || p.selection === selectionFilter)), [points, mt, selectedDays, kind, selectionFilter]);
-  const changeMtSearch = (value: string) => {
-    setMtSearch(value);
-    const matched = mts.find((candidate) => candidate.toLocaleLowerCase() === value.trim().toLocaleLowerCase());
-    const nextMt = matched ?? "all";
+  const selectMt = (nextMt: string) => {
     setMt(nextMt);
+    setMtSearch(nextMt === "all" ? "" : nextMt);
     if (nextMt !== "all") setSelectedDays((previous) => previous.filter((currentDay) => Boolean(forecast?.[nextMt]?.[currentDay])));
+    setOpenFilter(null);
   };
   const toggleDay = (currentDay: number) => setSelectedDays((previous) => previous.includes(currentDay)
     ? previous.filter((value) => value !== currentDay)
     : [...previous, currentDay].sort((a, b) => a - b));
+  const matchingMts = useMemo(() => {
+    const query = mtSearch.trim().toLocaleLowerCase();
+    return query ? mts.filter((candidate) => candidate.toLocaleLowerCase().includes(query)) : mts;
+  }, [mts, mtSearch]);
   const summary = useMemo(() => {
     const assigned = filtered.filter((p) => p.day);
     const tit = assigned.filter((p) => p.kind === "Titular"), sup = assigned.filter((p) => p.kind === "Suplente");
@@ -256,9 +260,8 @@ export default function Home() {
     {error && <p className="message error">{error}</p>}
     {!!points.length && <>
       <section className="toolbar"><div className="filters">
-        <label>Buscar MT FINAL<input className="mt-search" list="mt-finales" value={mtSearch} onChange={(e) => changeMtSearch(e.target.value)} placeholder="Escribe un MT FINAL" /><datalist id="mt-finales">{mts.map((x) => <option key={x} value={x} />)}</datalist></label>
-        <button className="clear-mt" type="button" onClick={() => { setMt("all"); setMtSearch(""); }}>Todos los MT</button>
-        <div className="day-filter"><span>Días {selectedDays.length ? `(${selectedDays.length})` : ""}</span><div className="day-picker"><button type="button" className={!selectedDays.length ? "day-chip active" : "day-chip"} onClick={() => setSelectedDays([])}>Todos</button>{availableDays.map((x) => <button type="button" key={x} className={selectedDays.includes(x) ? "day-chip active" : "day-chip"} onClick={() => toggleDay(x)}>Día {x}</button>)}</div></div>
+        <div className="filter-dropdown"><span>MT FINAL</span><button type="button" className="dropdown-trigger" aria-expanded={openFilter === "mt"} onClick={() => setOpenFilter((current) => current === "mt" ? null : "mt")}><b>{mt === "all" ? "Todos los MT" : mt}</b><i>⌄</i></button>{openFilter === "mt" && <div className="dropdown-menu mt-menu"><div className="dropdown-search"><i>⌕</i><input autoFocus value={mtSearch} onChange={(e) => setMtSearch(e.target.value)} placeholder="Buscar" aria-label="Buscar MT FINAL" /></div><div className="dropdown-options"><label><input type="checkbox" checked={mt === "all"} onChange={() => selectMt("all")} /><span>Todos los MT</span></label>{matchingMts.map((option) => <label key={option}><input type="checkbox" checked={mt === option} onChange={() => selectMt(option)} /><span>{option}</span></label>)}{!matchingMts.length && <p className="empty-options">No hay coincidencias</p>}</div></div>}</div>
+        <div className="filter-dropdown"><span>Días</span><button type="button" className="dropdown-trigger" aria-expanded={openFilter === "days"} onClick={() => setOpenFilter((current) => current === "days" ? null : "days")}><b>{selectedDays.length ? `${selectedDays.length} día${selectedDays.length === 1 ? "" : "s"} seleccionados` : "Todos los días"}</b><i>⌄</i></button>{openFilter === "days" && <div className="dropdown-menu days-menu"><div className="dropdown-options"><label><input type="checkbox" checked={!selectedDays.length} onChange={() => setSelectedDays([])} /><span>Todos los días</span></label>{availableDays.map((option) => <label key={option}><input type="checkbox" checked={selectedDays.includes(option)} onChange={() => toggleDay(option)} /><span>Día {option}</span></label>)}</div></div>}</div>
         <label>Tipo de punto<select value={kind} onChange={(e) => setKind(e.target.value)}><option value="all">Titulares y suplentes</option><option value="Titular">Solo titulares</option><option value="Suplente">Solo suplentes</option></select></label><label>Selección exacta<select value={selectionFilter} onChange={(e) => setSelectionFilter(e.target.value)}><option value="all">Todas las selecciones</option>{selectionOptions.map((selection) => <option key={selection} value={selection}>{selection}</option>)}</select></label></div><button className="download" onClick={download}>Descargar Excel ↓</button></section>
       <section className="metrics"><article><span>Puntos asignados</span><strong>{summary.assigned}</strong><small>{summary.tit} titulares · {summary.sup} suplentes</small></article><article><span>Promedio titulares</span><strong>{Math.round(summary.tAvg).toLocaleString()} m</strong><small>entre titulares del mismo día</small></article><article><span>Promedio suplentes</span><strong>{Math.round(summary.sAvg).toLocaleString()} m</strong><small>al titular más cercano</small></article></section>
       <section className="map-section"><div className="map-heading"><div><p className="eyebrow">MAPA DE PLANIFICACIÓN</p><h2>{mt === "all" ? "Todos los MT" : mt}</h2></div><div className="map-key"><p><i className="dot title" /> Titular <i className="dot spare" /> Suplente</p><div className="day-legend">{availableDays.map((currentDay) => <span key={currentDay}><i style={{ backgroundColor: COLORS[(currentDay - 1) % COLORS.length] }} />Día {currentDay}</span>)}</div><small>El color identifica el día. Selecciona un punto para moverlo.</small></div></div><GeoMap points={filtered} colors={COLORS} planningVersion={planningVersion} onSelect={setSelected} /></section>
