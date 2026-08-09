@@ -22,6 +22,7 @@ type Forecast = Record<string, Record<number, number>>;
 type Notice = { type: "info" | "warn"; text: string };
 
 const COLORS = ["#0b7285", "#7c3aed", "#e8590c", "#2f9e44", "#c2255c", "#1971c2", "#a61e4d", "#5f3dc4", "#087f5b", "#9c36b5"];
+const MAX_SUPPLEMENT_DISTANCE_METERS = 5000;
 const norm = (value: unknown) => String(value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 const key = (value: unknown) => norm(value).replace(/[^A-Z0-9]/g, "");
 const asNumber = (value: unknown) => {
@@ -50,7 +51,7 @@ const column = (rows: Raw[], names: string[]) => {
 };
 
 function extractPoints(rows: Raw[]) {
-  const mtCol = column(rows, ["MTFINAL", "MT"]);
+  const mtCol = column(rows, ["MTFINAL"]);
   const selectionCol = column(rows, ["SELECCION", "SELECCIONPUNTO"]);
   const latCol = column(rows, ["LATITUDE", "LATITUD", "LAT"]);
   const lngCol = column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG"]);
@@ -67,7 +68,7 @@ function extractPoints(rows: Raw[]) {
 }
 
 function extractForecast(rows: Raw[]) {
-  const mtCol = column(rows, ["MTFINAL", "MT"]);
+  const mtCol = column(rows, ["MTFINAL"]);
   if (!mtCol) throw new Error("El forecast debe tener una columna MT FINAL.");
   const result: Forecast = {};
   rows.forEach((row) => {
@@ -131,19 +132,21 @@ function assign(points: Point[], forecast: Forecast) {
     });
 
     let spare = all.filter((p) => p.kind === "Suplente").sort((a, b) => priority(a) - priority(b));
-    Object.entries(daily).forEach(([rawDay, count]) => {
+    Object.entries(daily).forEach(([rawDay]) => {
       const day = Number(rawDay), titulars = all.filter((p) => p.kind === "Titular" && p.day === day);
       const desired = titulars.length * 3;
-      if (!titulars.length || !spare.length) return;
-      const chosen = [...spare].sort((a, b) => {
-        const ap = priority(a), bp = priority(b);
+      if (!titulars.length) return;
+      const nearby = spare.map((point) => ({ point, distance: Math.min(...titulars.map((title) => meters(point, title))) }))
+        .filter(({ distance }) => distance <= MAX_SUPPLEMENT_DISTANCE_METERS);
+      const chosen = [...nearby].sort((a, b) => {
+        const ap = priority(a.point), bp = priority(b.point);
         if (ap !== bp) return ap - bp;
-        return Math.min(...titulars.map((t) => meters(a, t))) - Math.min(...titulars.map((t) => meters(b, t)));
-      }).slice(0, Math.min(desired, spare.length));
-      chosen.forEach((p) => { p.day = day; });
-      const ids = new Set(chosen.map((p) => p.id));
+        return a.distance - b.distance;
+      }).slice(0, Math.min(desired, nearby.length));
+      chosen.forEach(({ point }) => { point.day = day; });
+      const ids = new Set(chosen.map(({ point }) => point.id));
       spare = spare.filter((p) => !ids.has(p.id));
-      if (chosen.length < desired) notices.push({ type: "warn", text: `${mt}, día ${day}: ${chosen.length}/${desired} suplentes disponibles.` });
+      if (chosen.length < desired) notices.push({ type: "warn", text: `${mt}, día ${day}: ${chosen.length}/${desired} suplentes dentro de 5 km de los titulares.` });
     });
   });
   return { points: refreshAverages(next), notices };
