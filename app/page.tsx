@@ -16,13 +16,14 @@ type Point = {
   lat: number;
   lng: number;
   day: number | null;
+  assignedMt: string | null;
   avgMeters: number | null;
 };
 type Forecast = Record<string, Record<number, number>>;
 type Notice = { type: "info" | "warn"; text: string };
 
 const COLORS = ["#0b7285", "#7c3aed", "#e8590c", "#2f9e44", "#c2255c", "#1971c2", "#a61e4d", "#5f3dc4", "#087f5b", "#9c36b5"];
-const MAX_SUPPLEMENT_DISTANCE_METERS = 5000;
+const MAX_SUPPLEMENT_DISTANCE_METERS = 15000;
 const norm = (value: unknown) => String(value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 const key = (value: unknown) => norm(value).replace(/[^A-Z0-9]/g, "");
 const asNumber = (value: unknown) => {
@@ -49,6 +50,7 @@ const column = (rows: Raw[], names: string[]) => {
   const headers = Object.keys(rows[0] ?? {});
   return headers.find((h) => names.includes(key(h)));
 };
+const operationalMt = (point: Point) => point.assignedMt ?? point.mt;
 
 function extractPoints(rows: Raw[]) {
   const mtCol = column(rows, ["MTFINAL"]);
@@ -63,7 +65,7 @@ function extractPoints(rows: Raw[]) {
     const selection = norm(row[selectionCol]);
     return [{ id: String(row["RefID"] ?? row["REFID"] ?? index + 1) + "-" + index, row, mt: String(row[mtCol] ?? "").trim(), selection,
       kind: selection === "T" ? "Titular" : selection.startsWith("S") ? "Suplente" : "Otro",
-      lat: likelySwapped ? lng : lat, lng: likelySwapped ? lat : lng, day: null, avgMeters: null }];
+      lat: likelySwapped ? lng : lat, lng: likelySwapped ? lat : lng, day: null, assignedMt: null, avgMeters: null }];
   });
 }
 
@@ -94,7 +96,8 @@ function priority(point: Point) {
 function refreshAverages(points: Point[]) {
   return points.map((point) => {
     if (!point.day) return { ...point, avgMeters: null };
-    const titles = points.filter((p) => p.mt === point.mt && p.day === point.day && p.kind === "Titular");
+    const assignedMt = point.assignedMt ?? point.mt;
+    const titles = points.filter((p) => (p.assignedMt ?? p.mt) === assignedMt && p.day === point.day && p.kind === "Titular");
     const avgMeters = point.kind === "Titular"
       ? nearestAverage(point, titles)
       : titles.length ? Math.min(...titles.map((t) => meters(point, t))) : null;
@@ -103,7 +106,7 @@ function refreshAverages(points: Point[]) {
 }
 
 function assign(points: Point[], forecast: Forecast) {
-  const next = points.map((p) => ({ ...p, day: null, avgMeters: null }));
+  const next = points.map((p) => ({ ...p, day: null, assignedMt: null, avgMeters: null }));
   const notices: Notice[] = [];
   Object.entries(forecast).forEach(([mt, daily]) => {
     const all = next.filter((p) => p.mt === mt);
@@ -126,28 +129,32 @@ function assign(points: Point[], forecast: Forecast) {
         const c = centroid(group);
         group = [...available].sort((a, b) => meters(a, c as Point) - meters(b, c as Point)).slice(0, take);
       }
-      group.forEach((p) => { p.day = day; });
+      group.forEach((p) => { p.day = day; p.assignedMt = mt; });
       const ids = new Set(group.map((p) => p.id));
       available = available.filter((p) => !ids.has(p.id));
     });
 
-    let spare = all.filter((p) => p.kind === "Suplente").sort((a, b) => priority(a) - priority(b));
-    Object.entries(daily).forEach(([rawDay]) => {
-      const day = Number(rawDay), titulars = all.filter((p) => p.kind === "Titular" && p.day === day);
-      const desired = titulars.length * 3;
-      if (!titulars.length) return;
-      const nearby = spare.map((point) => ({ point, distance: Math.min(...titulars.map((title) => meters(point, title))) }))
-        .filter(({ distance }) => distance <= MAX_SUPPLEMENT_DISTANCE_METERS);
-      const chosen = [...nearby].sort((a, b) => {
-        const ap = priority(a.point), bp = priority(b.point);
-        if (ap !== bp) return ap - bp;
-        return a.distance - b.distance;
-      }).slice(0, Math.min(desired, nearby.length));
-      chosen.forEach(({ point }) => { point.day = day; });
-      const ids = new Set(chosen.map(({ point }) => point.id));
-      spare = spare.filter((p) => !ids.has(p.id));
-      if (chosen.length < desired) notices.push({ type: "warn", text: `${mt}, día ${day}: ${chosen.length}/${desired} suplentes dentro de 5 km de los titulares.` });
-    });
+  });
+
+  // Titulares remain in their original MT FINAL. Suplentes are then allocated globally to the closest eligible daily group.
+  const groups = Object.entries(forecast).flatMap(([mt, daily]) => Object.keys(daily).map(Number).flatMap((day) => {
+    const titulars = next.filter((point) => point.kind === "Titular" && point.assignedMt === mt && point.day === day);
+    return titulars.length ? [{ mt, day, titulars, desired: titulars.length * 3, assigned: [] as Point[] }] : [];
+  }));
+  const edges = next.filter((point) => point.kind === "Suplente").flatMap((point) => groups.flatMap((group) => {
+    const distance = Math.min(...group.titulars.map((title) => meters(point, title)));
+    return distance <= MAX_SUPPLEMENT_DISTANCE_METERS ? [{ point, group, distance }] : [];
+  })).sort((a, b) => priority(a.point) - priority(b.point) || a.distance - b.distance);
+  const usedSpares = new Set<string>();
+  edges.forEach(({ point, group }) => {
+    if (usedSpares.has(point.id) || group.assigned.length >= group.desired) return;
+    point.day = group.day;
+    point.assignedMt = group.mt;
+    group.assigned.push(point);
+    usedSpares.add(point.id);
+  });
+  groups.forEach((group) => {
+    if (group.assigned.length < group.desired) notices.push({ type: "warn", text: `${group.mt}, día ${group.day}: ${group.assigned.length}/${group.desired} suplentes dentro de 15 km de los titulares.` });
   });
   return { points: refreshAverages(next), notices };
 }
@@ -174,11 +181,11 @@ export default function Home() {
     catch (e) { setError(e instanceof Error ? e.message : "No se pudo leer el archivo."); }
   };
   const calculate = () => { try { if (!base || !forecast) throw new Error("Carga la base de puntos y el forecast antes de calcular."); const result = assign(extractPoints(base), forecast); setPoints(result.points); setNotices(result.notices); setSelected(null); setPlanningVersion((version) => version + 1); } catch (e) { setError(e instanceof Error ? e.message : "No fue posible calcular la asignación."); } };
-  const mts = useMemo(() => [...new Set(points.map((p) => p.mt))].sort(), [points]);
+  const mts = useMemo(() => Object.keys(forecast ?? {}).sort(), [forecast]);
   const availableDays = useMemo(() => mt === "all"
     ? [...new Set(points.flatMap((p) => p.day ? [p.day] : []))].sort((a, b) => a - b)
     : Object.keys(forecast?.[mt] ?? {}).map(Number).sort((a, b) => a - b), [points, forecast, mt]);
-  const filtered = useMemo(() => points.filter((p) => (mt === "all" || p.mt === mt) && (day === "all" || p.day === Number(day)) && (kind === "all" || p.kind === kind)), [points, mt, day, kind]);
+  const filtered = useMemo(() => points.filter((p) => (mt === "all" || operationalMt(p) === mt) && (day === "all" || p.day === Number(day)) && (kind === "all" || p.kind === kind)), [points, mt, day, kind]);
   const summary = useMemo(() => {
     const assigned = filtered.filter((p) => p.day);
     const tit = assigned.filter((p) => p.kind === "Titular"), sup = assigned.filter((p) => p.kind === "Suplente");
@@ -189,7 +196,8 @@ export default function Home() {
   const download = () => {
     if (!base || !points.length) return;
     const lookup = new Map(points.map((p) => [p.id.split("-").slice(0, -1).join("-"), p]));
-    const rows = base.map((row, i) => { const ref = String(row["RefID"] ?? row["REFID"] ?? i + 1), p = lookup.get(ref); return { ...row, DIA: p?.day ?? "", "Promedio metros": p?.avgMeters == null ? "" : Math.round(p.avgMeters) }; });
+    const mtHeader = Object.keys(base[0] ?? {}).find((header) => key(header) === "MTFINAL");
+    const rows = base.map((row, i) => { const ref = String(row["RefID"] ?? row["REFID"] ?? i + 1), p = lookup.get(ref); return { ...row, ...(p?.assignedMt && mtHeader ? { [mtHeader]: p.assignedMt } : {}), DIA: p?.day ?? "", "Promedio metros": p?.avgMeters == null ? "" : Math.round(p.avgMeters) }; });
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Asignación"); XLSX.writeFile(wb, "BD_PUNTOS_ASIGNADOS.xlsx");
   };
   return <main>
@@ -201,9 +209,9 @@ export default function Home() {
       <section className="toolbar"><div className="filters"><label>MT FINAL<select value={mt} onChange={(e) => { const nextMt = e.target.value; setMt(nextMt); if (day !== "all" && nextMt !== "all" && !forecast?.[nextMt]?.[Number(day)]) setDay("all"); }}><option value="all">Todos los MT</option>{mts.map((x) => <option key={x} value={x}>{x}</option>)}</select></label><label>Día<select value={day} onChange={(e) => setDay(e.target.value)}><option value="all">Todos los días</option>{availableDays.map((x) => <option key={x} value={x}>Día {x}</option>)}</select></label><label>Selección<select value={kind} onChange={(e) => setKind(e.target.value)}><option value="all">Titulares y suplentes</option><option value="Titular">Solo titulares</option><option value="Suplente">Solo suplentes</option></select></label></div><button className="download" onClick={download}>Descargar Excel ↓</button></section>
       <section className="metrics"><article><span>Puntos asignados</span><strong>{summary.assigned}</strong><small>{summary.tit} titulares · {summary.sup} suplentes</small></article><article><span>Promedio titulares</span><strong>{Math.round(summary.tAvg).toLocaleString()} m</strong><small>entre titulares del mismo día</small></article><article><span>Promedio suplentes</span><strong>{Math.round(summary.sAvg).toLocaleString()} m</strong><small>al titular más cercano</small></article></section>
       <section className="map-section"><div className="map-heading"><div><p className="eyebrow">MAPA DE PLANIFICACIÓN</p><h2>{mt === "all" ? "Todos los MT" : mt}</h2></div><div className="map-key"><p><i className="dot title" /> Titular <i className="dot spare" /> Suplente</p><div className="day-legend">{availableDays.map((currentDay) => <span key={currentDay}><i style={{ backgroundColor: COLORS[(currentDay - 1) % COLORS.length] }} />Día {currentDay}</span>)}</div><small>El color identifica el día. Selecciona un punto para moverlo.</small></div></div><GeoMap points={filtered} colors={COLORS} planningVersion={planningVersion} onSelect={setSelected} /></section>
-      <section className="day-table"><div><p className="eyebrow">CONTROL POR JORNADA</p><h2>Distancias y cumplimiento</h2></div><table><thead><tr><th>MT FINAL</th><th>Día</th><th>Titulares</th><th>Suplentes</th><th>Prom. titulares</th><th>Prom. suplentes</th></tr></thead><tbody>{Object.entries(forecast ?? {}).flatMap(([m, d]) => Object.keys(d).map(Number).map((d) => { const group = points.filter((p) => p.mt === m && p.day === d), ts = group.filter((p) => p.kind === "Titular"), ss = group.filter((p) => p.kind === "Suplente"); const a=(x:Point[])=>x.length?Math.round(x.reduce((s,p)=>s+(p.avgMeters??0),0)/x.length):0; return <tr key={`${m}-${d}`}><td>{m}</td><td>Día {d}</td><td>{ts.length} / {forecast?.[m]?.[d]}</td><td>{ss.length} / {ts.length * 3}</td><td>{a(ts).toLocaleString()} m</td><td>{a(ss).toLocaleString()} m</td></tr>; }))}</tbody></table></section>
+      <section className="day-table"><div><p className="eyebrow">CONTROL POR JORNADA</p><h2>Distancias y cumplimiento</h2></div><table><thead><tr><th>MT FINAL</th><th>Día</th><th>Titulares</th><th>Suplentes</th><th>Prom. titulares</th><th>Prom. suplentes</th></tr></thead><tbody>{Object.entries(forecast ?? {}).flatMap(([m, d]) => Object.keys(d).map(Number).map((d) => { const group = points.filter((p) => operationalMt(p) === m && p.day === d), ts = group.filter((p) => p.kind === "Titular"), ss = group.filter((p) => p.kind === "Suplente"); const a=(x:Point[])=>x.length?Math.round(x.reduce((s,p)=>s+(p.avgMeters??0),0)/x.length):0; return <tr key={`${m}-${d}`}><td>{m}</td><td>Día {d}</td><td>{ts.length} / {forecast?.[m]?.[d]}</td><td>{ss.length} / {ts.length * 3}</td><td>{a(ts).toLocaleString()} m</td><td>{a(ss).toLocaleString()} m</td></tr>; }))}</tbody></table></section>
     </>}
     {notices.map((notice, i) => <p className={`message ${notice.type}`} key={i}>{notice.text}</p>)}
-    {selected && <aside className="editor"><button aria-label="Cerrar" onClick={() => setSelected(null)}>×</button><p className="eyebrow">AJUSTE MANUAL</p><h3>{String(selected.row["PDV"] ?? selected.row["RefID"] ?? "Punto")}</h3><p>{selected.mt} · {selected.kind} · {selected.selection}</p><label>Asignar a<select value={selected.day ?? ""} onChange={(e) => moveSelected(e.target.value ? Number(e.target.value) : null)}><option value="">Sin asignar</option>{Object.keys(forecast?.[selected.mt] ?? {}).map(Number).sort((a,b)=>a-b).map((d) => <option key={d} value={d}>Día {d}</option>)}</select></label><small>Este ajuste se guardará en el Excel descargado.</small></aside>}
+    {selected && <aside className="editor"><button aria-label="Cerrar" onClick={() => setSelected(null)}>×</button><p className="eyebrow">AJUSTE MANUAL</p><h3>{String(selected.row["PDV"] ?? selected.row["RefID"] ?? "Punto")}</h3><p>{operationalMt(selected)} · {selected.kind} · {selected.selection}</p><label>Asignar a<select value={selected.day ?? ""} onChange={(e) => moveSelected(e.target.value ? Number(e.target.value) : null)}><option value="">Sin asignar</option>{Object.keys(forecast?.[operationalMt(selected)] ?? {}).map(Number).sort((a,b)=>a-b).map((d) => <option key={d} value={d}>Día {d}</option>)}</select></label><small>Este ajuste se guardará en el Excel descargado.</small></aside>}
   </main>;
 }
