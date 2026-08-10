@@ -59,6 +59,9 @@ h1,h2,h3,p { margin:0; }
 .qa-road:disabled { cursor:not-allowed; opacity:.45; }
 .spin { animation:spin .9s linear infinite; }
 .download { display:inline-flex; align-items:center; justify-content:center; gap:8px; flex:0 0 auto; padding:11px 15px; border:0; border-radius:12px; background:var(--primary); color:#fff; font-size:13px; font-weight:700; box-shadow:0 15px 28px -18px rgba(96,59,196,.8); transition:transform .25s,box-shadow .25s,filter .25s; }
+.download:disabled { cursor:not-allowed; opacity:.55; }
+.processing-message,.map-performance-note { display:flex; align-items:center; gap:8px; padding:11px 14px; border:1px solid rgba(113,72,232,.18); border-radius:12px; background:rgba(113,72,232,.07); color:var(--primary); font-size:12px; font-weight:650; }
+.map-performance-note { margin:0 18px 12px; color:var(--muted); font-weight:600; }
 
 .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
 .metrics article { display:flex; align-items:flex-start; gap:14px; min-height:128px; padding:20px; border:1px solid var(--border); border-radius:18px; background:rgba(255,255,255,.92); box-shadow:var(--shadow); transition:transform .3s,border-color .3s,box-shadow .3s; }
