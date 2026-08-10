@@ -21,7 +21,7 @@ function labeledIcon(label: "T" | "S", color: string) {
 
 export default function GeoMap({ points, colors, planningVersion, onSelect }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void }) {
   const center: LatLngExpression = points.length ? [points.reduce((s,p)=>s+p.lat,0)/points.length, points.reduce((s,p)=>s+p.lng,0)/points.length] : [18.7357, -70.1627];
-  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' contributors url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{points.filter((p) => p.day).map((point) => {
+  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{points.filter((p) => p.day).map((point) => {
     const color = colors[(point.day! - 1) % colors.length];
     return <Marker key={point.id} position={[point.lat, point.lng]} icon={labeledIcon(point.kind === "Titular" ? "T" : "S", color)} eventHandlers={{ click: () => onSelect(point) }}><PointPopup point={point} onSelect={onSelect} /></Marker>;
   })}</MapContainer></div>;
