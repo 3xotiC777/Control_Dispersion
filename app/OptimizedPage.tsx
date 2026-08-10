@@ -2,13 +2,13 @@
 
 import dynamic from "next/dynamic";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Check, ChevronDown, CircleGauge, Database, Download, Layers3, LineChart, LoaderCircle, MapPinned, Route, Search, ShieldCheck, SlidersHorizontal, Sparkles, Tags, UploadCloud, UserRound, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, CircleGauge, Database, Download, Layers3, LineChart, LoaderCircle, MapPinned, MousePointer2, Route, Search, ShieldCheck, SlidersHorizontal, Sparkles, Tags, Trash2, UploadCloud, UserRound, X } from "lucide-react";
 import { operationalMt, type Forecast, type Notice, type Point } from "./planning-core";
 
 const GeoMap = dynamic(() => import("./GeoMap"), { ssr: false });
 const COLORS = ["#0b7285", "#7c3aed", "#e8590c", "#2f9e44", "#c2255c", "#1971c2", "#a61e4d", "#5f3dc4", "#087f5b", "#9c36b5"];
 
-type Busy = "base" | "forecast" | "calculate" | "download" | "qa" | "move" | null;
+type Busy = "base" | "forecast" | "calculate" | "download" | "qa" | "move" | "bulk-move" | null;
 type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void };
 type WorkerResponse = { id?: number; type?: string; text?: string; ok?: boolean; payload?: unknown; error?: string };
 
@@ -50,6 +50,9 @@ export default function OptimizedPage() {
   const [selectionFilter, setSelectionFilter] = useState("all");
   const [planningVersion, setPlanningVersion] = useState(0);
   const [selected, setSelected] = useState<Point | null>(null);
+  const [multiSelect, setMultiSelect] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDay, setBulkDay] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
   const [progress, setProgress] = useState("");
@@ -98,7 +101,7 @@ export default function OptimizedPage() {
         const result = await workerCall("load-forecast", { buffer }, [buffer]) as { forecast: Forecast };
         setForecast(result.forecast);
       }
-      setPoints([]); setNotices([]); setSelected(null); setMt("all"); setSelectedDays([]);
+      setPoints([]); setNotices([]); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setMt("all"); setSelectedDays([]);
     } catch (exception) {
       if (type === "base") setBaseInfo(null); else setForecast(null);
       setPoints([]); setNotices([]);
@@ -111,7 +114,7 @@ export default function OptimizedPage() {
     setBusy("calculate"); setError(""); setProgress(`Optimizando ${baseInfo.count.toLocaleString()} registros…`);
     try {
       const result = await workerCall("calculate") as { points: Point[]; notices: Notice[] };
-      setPoints(result.points); setNotices(result.notices); setSelected(null); setPlanningVersion((version) => version + 1);
+      setPoints(result.points); setNotices(result.notices); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setPlanningVersion((version) => version + 1);
     } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible calcular la asignación."); }
     finally { setBusy(null); setProgress(""); }
   };
@@ -168,13 +171,32 @@ export default function OptimizedPage() {
   const mapLimit = mt === "all" ? 1200 : 3000;
   const mapPoints = useMemo(() => sampledMapPoints(mapCandidates, mapLimit), [mapCandidates, mapLimit]);
   const mapLimited = mapCandidates.length > mapPoints.length;
+  const bulkPoints = useMemo(() => points.filter((point) => selectedIds.has(point.id)), [points, selectedIds]);
+  const bulkDays = useMemo(() => {
+    if (!bulkPoints.length) return [];
+    const common = new Set(Object.keys(forecast?.[operationalMt(bulkPoints[0])] ?? {}).map(Number));
+    bulkPoints.slice(1).forEach((point) => {
+      const available = new Set(Object.keys(forecast?.[operationalMt(point)] ?? {}).map(Number));
+      [...common].forEach((day) => { if (!available.has(day)) common.delete(day); });
+    });
+    return [...common].sort((a, b) => a - b);
+  }, [bulkPoints, forecast]);
+  const bulkSummary = useMemo(() => ({
+    titles: bulkPoints.filter((point) => point.kind === "Titular").length,
+    spares: bulkPoints.filter((point) => point.kind === "Suplente").length,
+    mts: new Set(bulkPoints.map(operationalMt)).size,
+  }), [bulkPoints]);
+
+  const clearBulkSelection = () => { setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); };
+  const handleMultiSelect = (selectedPoints: Point[]) => { setSelectedIds(new Set(selectedPoints.map((point) => point.id))); setBulkDay(""); };
 
   const selectMt = (nextMt: string) => {
     setMt(nextMt); setMtSearch(nextMt === "all" ? "" : nextMt);
     if (nextMt !== "all") setSelectedDays((previous) => previous.filter((day) => Boolean(forecast?.[nextMt]?.[day])));
+    clearBulkSelection();
     setOpenFilter(null);
   };
-  const toggleDay = (day: number) => setSelectedDays((previous) => previous.includes(day) ? previous.filter((value) => value !== day) : [...previous, day].sort((a, b) => a - b));
+  const toggleDay = (day: number) => { setSelectedDays((previous) => previous.includes(day) ? previous.filter((value) => value !== day) : [...previous, day].sort((a, b) => a - b)); clearBulkSelection(); };
   const matchingMts = useMemo(() => {
     const query = mtSearch.trim().toLocaleLowerCase();
     return query ? mts.filter((candidate) => candidate.toLocaleLowerCase().includes(query)) : mts;
@@ -190,6 +212,19 @@ export default function OptimizedPage() {
       setSelected((previous) => previous ? updates.get(previous.id) ?? { ...previous, day: newDay } : previous);
       setNotices(result.notices);
     } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible mover el punto."); }
+    finally { setBusy(null); }
+  };
+
+  const moveBulkSelection = async () => {
+    if (!selectedIds.size || !bulkDay || busy) return;
+    setBusy("bulk-move"); setError("");
+    try {
+      const result = await workerCall("bulk-move", { ids: [...selectedIds], day: Number(bulkDay) }) as { updates: Point[]; notices: Notice[] };
+      const updates = new Map(result.updates.map((point) => [point.id, point]));
+      setPoints((previous) => previous.map((point) => updates.get(point.id) ?? point));
+      setNotices(result.notices);
+      clearBulkSelection();
+    } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible mover los puntos seleccionados."); }
     finally { setBusy(null); }
   };
 
@@ -211,7 +246,7 @@ export default function OptimizedPage() {
     setBusy("qa"); setError(""); setProgress("Consultando carreteras y optimizando el MT…");
     try {
       const result = await workerCall("qa", { mt }) as { points: Point[]; notices: Notice[] };
-      setPoints(result.points); setNotices(result.notices); setSelected(null); setPlanningVersion((version) => version + 1);
+      setPoints(result.points); setNotices(result.notices); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setPlanningVersion((version) => version + 1);
     } catch (exception) { setError(`QA vial no aplicado: ${exception instanceof Error ? exception.message : "no fue posible consultar la red de carreteras"} No se modificó la planificación.`); }
     finally { setBusy(null); setProgress(""); }
   };
@@ -230,13 +265,14 @@ export default function OptimizedPage() {
       <section className="metrics"><article><i><Route size={20} /></i><div><span>Puntos asignados</span><strong>{summary.assigned}</strong><small>{summary.tit} titulares · {summary.sup} suplentes</small></div></article><article><i><CircleGauge size={20} /></i><div><span>Promedio titulares</span><strong>{Math.round(summary.tAvg).toLocaleString()} m</strong><small>entre titulares del mismo día</small></div></article><article className="accent"><i><MapPinned size={20} /></i><div><span>Promedio suplentes</span><strong>{Math.round(summary.sAvg).toLocaleString()} m</strong><small>al titular más cercano</small></div></article></section>
       <section className="toolbar"><div className="filters">
         <div className="filter-dropdown"><span><UserRound size={14} /> MT FINAL</span><button type="button" className="dropdown-trigger" aria-expanded={openFilter === "mt"} onClick={() => setOpenFilter((current) => current === "mt" ? null : "mt")}><b>{mt === "all" ? "Todos los MT" : mt}</b><ChevronDown size={16} /></button>{openFilter === "mt" && <div className="dropdown-menu mt-menu"><div className="dropdown-search"><Search size={16} /><input value={mtSearch} onChange={(event) => setMtSearch(event.target.value)} placeholder="Buscar MT FINAL" aria-label="Buscar MT FINAL" /></div><div className="dropdown-options"><label><input type="checkbox" checked={mt === "all"} onChange={() => selectMt("all")} /><span>Todos los MT</span></label>{matchingMts.map((option) => <label key={option}><input type="checkbox" checked={mt === option} onChange={() => selectMt(option)} /><span>{option}</span></label>)}{!matchingMts.length && <p className="empty-options">No hay coincidencias</p>}</div></div>}</div>
-        <div className="filter-dropdown"><span><CalendarDays size={14} /> Días</span><button type="button" className="dropdown-trigger" aria-expanded={openFilter === "days"} onClick={() => setOpenFilter((current) => current === "days" ? null : "days")}><b>{selectedDays.length ? `${selectedDays.length} día${selectedDays.length === 1 ? "" : "s"} seleccionados` : "Todos los días"}</b><ChevronDown size={16} /></button>{openFilter === "days" && <div className="dropdown-menu days-menu"><div className="dropdown-options"><label><input type="checkbox" checked={!selectedDays.length} onChange={() => setSelectedDays([])} /><span>Todos los días</span></label>{availableDays.map((option) => <label key={option}><input type="checkbox" checked={selectedDays.includes(option)} onChange={() => toggleDay(option)} /><span>Día {option}</span></label>)}</div></div>}</div>
-        <label><span><SlidersHorizontal size={14} /> Tipo de punto</span><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">Titulares y suplentes</option><option value="Titular">Solo titulares</option><option value="Suplente">Solo suplentes</option></select></label><label><span><Tags size={14} /> Selección exacta</span><select value={selectionFilter} onChange={(event) => setSelectionFilter(event.target.value)}><option value="all">Todas las selecciones</option>{selectionOptions.map((selection) => <option key={selection} value={selection}>{selection}</option>)}</select></label>
+        <div className="filter-dropdown"><span><CalendarDays size={14} /> Días</span><button type="button" className="dropdown-trigger" aria-expanded={openFilter === "days"} onClick={() => setOpenFilter((current) => current === "days" ? null : "days")}><b>{selectedDays.length ? `${selectedDays.length} día${selectedDays.length === 1 ? "" : "s"} seleccionados` : "Todos los días"}</b><ChevronDown size={16} /></button>{openFilter === "days" && <div className="dropdown-menu days-menu"><div className="dropdown-options"><label><input type="checkbox" checked={!selectedDays.length} onChange={() => { setSelectedDays([]); clearBulkSelection(); }} /><span>Todos los días</span></label>{availableDays.map((option) => <label key={option}><input type="checkbox" checked={selectedDays.includes(option)} onChange={() => toggleDay(option)} /><span>Día {option}</span></label>)}</div></div>}</div>
+        <label><span><SlidersHorizontal size={14} /> Tipo de punto</span><select value={kind} onChange={(event) => { setKind(event.target.value); clearBulkSelection(); }}><option value="all">Titulares y suplentes</option><option value="Titular">Solo titulares</option><option value="Suplente">Solo suplentes</option></select></label><label><span><Tags size={14} /> Selección exacta</span><select value={selectionFilter} onChange={(event) => { setSelectionFilter(event.target.value); clearBulkSelection(); }}><option value="all">Todas las selecciones</option>{selectionOptions.map((selection) => <option key={selection} value={selection}>{selection}</option>)}</select></label>
       </div></section>
-      <section className="map-section"><div className="map-heading"><div><span className="section-kicker"><MapPinned size={14} /> MAPA DE PLANIFICACIÓN</span><h2>{mt === "all" ? "Todos los MT" : mt}</h2></div><div className="map-key"><p><i className="dot title" /> Titular <i className="dot spare" /> Suplente</p><div className="day-legend">{availableDays.map((day) => <span key={day}><i style={{ backgroundColor: COLORS[(day - 1) % COLORS.length] }} />Día {day}</span>)}</div><small>El color identifica el día. Selecciona un punto para moverlo.</small></div></div>{mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {mapCandidates.length.toLocaleString()} puntos. Selecciona un MT FINAL o días específicos para verlos todos.</p>}<GeoMap points={mapPoints} colors={COLORS} planningVersion={planningVersion} onSelect={setSelected} /></section>
+      <section className="map-section"><div className="map-heading"><div className="map-title-actions"><div><span className="section-kicker"><MapPinned size={14} /> MAPA DE PLANIFICACIÓN</span><h2>{mt === "all" ? "Todos los MT" : mt}</h2></div><button type="button" className={`map-select-button${multiSelect ? " active" : ""}`} disabled={mapLimited || !mapPoints.length || Boolean(busy)} onClick={() => { if (multiSelect) clearBulkSelection(); else { setMultiSelect(true); setSelected(null); setSelectedIds(new Set()); setBulkDay(""); } }} title={mapLimited ? "Filtra un MT FINAL o días hasta que el mapa muestre todos los puntos" : "Arrastra un rectángulo para seleccionar varios puntos"}><MousePointer2 size={16} /> Selección múltiple</button></div><div className="map-key"><p><i className="dot title" /> Titular <i className="dot spare" /> Suplente</p><div className="day-legend">{availableDays.map((day) => <span key={day}><i style={{ backgroundColor: COLORS[(day - 1) % COLORS.length] }} />Día {day}</span>)}</div><small>El color identifica el día. Selecciona un punto para moverlo.</small></div></div>{mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {mapCandidates.length.toLocaleString()} puntos. Selecciona un MT FINAL o días específicos para verlos todos y activar la selección múltiple.</p>}{multiSelect && <p className="map-selection-help"><MousePointer2 size={15} /> Mantén presionado el botón izquierdo y arrastra un rectángulo alrededor de los puntos que deseas mover.</p>}<GeoMap points={mapPoints} colors={COLORS} planningVersion={planningVersion} onSelect={setSelected} multiSelect={multiSelect} selectedIds={selectedIds} onMultiSelect={handleMultiSelect} /></section>
       <section className="day-table"><div className="table-heading"><span className="section-kicker"><Layers3 size={14} /> CONTROL POR JORNADA</span><h2>Distancias y cumplimiento</h2></div><table><thead><tr><th>MT FINAL</th><th>Día</th><th>Titulares</th><th>Suplentes</th><th>Prom. titulares</th><th>Prom. suplentes</th></tr></thead><tbody>{tableRows.map((row) => <tr key={`${row.mt}-${row.day}`}><td>{row.mt}</td><td>Día {row.day}</td><td>{row.tit} / {forecast?.[row.mt]?.[row.day]}</td><td>{row.sup} / {kind === "Suplente" ? "—" : row.tit * 3}</td><td>{row.titleAverage.toLocaleString()} m</td><td>{row.spareAverage.toLocaleString()} m</td></tr>)}</tbody></table></section>
     </div>}
     {notices.map((notice, index) => <p className={`message ${notice.type}`} key={`${notice.type}-${index}`}>{notice.text}</p>)}
-    {selected && <aside className="editor animate-pop-in"><button aria-label="Cerrar" onClick={() => setSelected(null)}><X size={20} /></button><span className="section-kicker">AJUSTE MANUAL</span><h3>{selected.name}</h3><p>RefID: {selected.refId}<br />{operationalMt(selected)} · {selected.kind} · {selected.selection}</p><label><span>Asignar a</span><select disabled={busy === "move"} value={selected.day ?? ""} onChange={(event) => moveSelected(event.target.value ? Number(event.target.value) : null)}><option value="">Sin asignar</option>{Object.keys(forecast?.[operationalMt(selected)] ?? {}).map(Number).sort((a, b) => a - b).map((day) => <option key={day} value={day}>Día {day}</option>)}</select></label><small>{busy === "move" ? "Aplicando cambio…" : "Este ajuste se guardará en el Excel descargado."}</small></aside>}
+    {!!bulkPoints.length && <aside className="editor bulk-editor animate-pop-in"><button className="editor-close" aria-label="Cerrar selección múltiple" onClick={clearBulkSelection}><X size={20} /></button><span className="section-kicker">SELECCIÓN MÚLTIPLE</span><h3>{bulkPoints.length.toLocaleString()} puntos seleccionados</h3><p>{bulkSummary.titles} titulares · {bulkSummary.spares} suplentes<br />{bulkSummary.mts} MT FINAL involucrado{bulkSummary.mts === 1 ? "" : "s"}</p><label><span>Mover todos al día</span><select value={bulkDay} onChange={(event) => setBulkDay(event.target.value)} disabled={busy === "bulk-move" || !bulkDays.length}><option value="">Selecciona un día</option>{bulkDays.map((day) => <option key={day} value={day}>Día {day}</option>)}</select></label><button className="bulk-apply" onClick={moveBulkSelection} disabled={!bulkDay || busy === "bulk-move"}>{busy === "bulk-move" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} {busy === "bulk-move" ? "Aplicando cambios…" : `Mover ${bulkPoints.length.toLocaleString()} puntos`}</button><button className="bulk-clear" onClick={clearBulkSelection} disabled={busy === "bulk-move"}><Trash2 size={15} /> Limpiar selección</button>{!bulkDays.length && <small>No hay días comunes entre los MT seleccionados. Filtra un solo MT FINAL y vuelve a seleccionar.</small>}<small>El cambio se reflejará en la tabla y en el Excel descargado.</small></aside>}
+    {selected && <aside className="editor animate-pop-in"><button className="editor-close" aria-label="Cerrar" onClick={() => setSelected(null)}><X size={20} /></button><span className="section-kicker">AJUSTE MANUAL</span><h3>{selected.name}</h3><p>RefID: {selected.refId}<br />{operationalMt(selected)} · {selected.kind} · {selected.selection}</p><label><span>Asignar a</span><select disabled={busy === "move"} value={selected.day ?? ""} onChange={(event) => moveSelected(event.target.value ? Number(event.target.value) : null)}><option value="">Sin asignar</option>{Object.keys(forecast?.[operationalMt(selected)] ?? {}).map(Number).sort((a, b) => a - b).map((day) => <option key={day} value={day}>Día {day}</option>)}</select></label><small>{busy === "move" ? "Aplicando cambio…" : "Este ajuste se guardará en el Excel descargado."}</small></aside>}
   </div></main>;
 }

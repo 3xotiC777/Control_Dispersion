@@ -1,7 +1,8 @@
 "use client";
 
-import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
-import { divIcon, type LatLngExpression } from "leaflet";
+import { useEffect, useRef, useState } from "react";
+import { MapContainer, Marker, Popup, Rectangle, TileLayer, useMap, useMapEvents } from "react-leaflet";
+import { divIcon, latLngBounds, type LatLng, type LatLngBounds, type LatLngExpression } from "leaflet";
 import styles from "./supplement-markers.module.css";
 import type { Point } from "./planning-core";
 
@@ -9,13 +10,13 @@ function PointPopup({ point, onSelect }: { point: Point; onSelect: (point: Point
   return <Popup><b>{point.name}</b><br />RefID: {point.refId}<br />{point.assignedMt ?? point.mt}<br />Día {point.day} · {point.kind}<br />{Math.round(point.avgMeters ?? 0).toLocaleString()} m promedio<br /><button onClick={() => onSelect(point)}>Cambiar día</button></Popup>;
 }
 
-function labeledIcon(label: "T" | "S", color: string) {
-  const cacheKey = `${label}-${color}`;
+function labeledIcon(label: "T" | "S", color: string, selected: boolean) {
+  const cacheKey = `${label}-${color}-${selected ? "selected" : "normal"}`;
   const cached = iconCache.get(cacheKey);
   if (cached) return cached;
   const icon = divIcon({
     className: styles.supplementIcon,
-    html: `<span class="${styles.supplementLabel}" style="--day-color:${color}">${label}</span>`,
+    html: `<span class="${styles.supplementLabel}${selected ? ` ${styles.selectedLabel}` : ""}" style="--day-color:${color}">${label}</span>`,
     iconSize: [24, 24],
     iconAnchor: [12, 12],
   });
@@ -25,10 +26,41 @@ function labeledIcon(label: "T" | "S", color: string) {
 
 const iconCache = new Map<string, ReturnType<typeof divIcon>>();
 
-export default function GeoMap({ points, colors, planningVersion, onSelect }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void }) {
+function BoxSelection({ enabled, points, onSelect }: { enabled: boolean; points: Point[]; onSelect: (points: Point[]) => void }) {
+  const map = useMap();
+  const startRef = useRef<LatLng | null>(null);
+  const [bounds, setBounds] = useState<LatLngBounds | null>(null);
+  useEffect(() => {
+    const container = map.getContainer();
+    if (enabled) { map.dragging.disable(); container.style.cursor = "crosshair"; }
+    else { map.dragging.enable(); container.style.cursor = ""; startRef.current = null; }
+    return () => { map.dragging.enable(); container.style.cursor = ""; };
+  }, [enabled, map]);
+  useMapEvents({
+    mousedown(event) {
+      if (!enabled || event.originalEvent.button !== 0) return;
+      startRef.current = event.latlng;
+      setBounds(latLngBounds(event.latlng, event.latlng));
+    },
+    mousemove(event) {
+      if (!enabled || !startRef.current) return;
+      setBounds(latLngBounds(startRef.current, event.latlng));
+    },
+    mouseup(event) {
+      if (!enabled || !startRef.current) return;
+      const selectionBounds = latLngBounds(startRef.current, event.latlng);
+      startRef.current = null;
+      setBounds(null);
+      onSelect(points.filter((point) => selectionBounds.contains([point.lat, point.lng])));
+    },
+  });
+  return bounds ? <Rectangle bounds={bounds} pathOptions={{ color: "#7148e8", weight: 2, fillColor: "#7148e8", fillOpacity: 0.12, dashArray: "6 5" }} /> : null;
+}
+
+export default function GeoMap({ points, colors, planningVersion, onSelect, multiSelect, selectedIds, onMultiSelect }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void; multiSelect: boolean; selectedIds: ReadonlySet<string>; onMultiSelect: (points: Point[]) => void }) {
   const center: LatLngExpression = points.length ? [points.reduce((s,p)=>s+p.lat,0)/points.length, points.reduce((s,p)=>s+p.lng,0)/points.length] : [18.7357, -70.1627];
-  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{points.map((point) => {
+  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" /><BoxSelection enabled={multiSelect} points={points} onSelect={onMultiSelect} />{points.map((point) => {
     const color = colors[(point.day! - 1) % colors.length];
-    return <Marker key={point.id} position={[point.lat, point.lng]} icon={labeledIcon(point.kind === "Titular" ? "T" : "S", color)} eventHandlers={{ click: () => onSelect(point) }}><PointPopup point={point} onSelect={onSelect} /></Marker>;
+    return <Marker key={point.id} position={[point.lat, point.lng]} icon={labeledIcon(point.kind === "Titular" ? "T" : "S", color, selectedIds.has(point.id))} eventHandlers={{ click: () => { if (!multiSelect) onSelect(point); } }}>{!multiSelect && <PointPopup point={point} onSelect={onSelect} />}</Marker>;
   })}</MapContainer></div>;
 }

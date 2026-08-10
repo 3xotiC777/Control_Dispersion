@@ -3,7 +3,7 @@
 import * as XLSX from "xlsx";
 import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, refreshAverages, runRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
 
-type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "qa" | "download"; payload?: Record<string, unknown> };
+type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
 let baseBuffer: ArrayBuffer | null = null;
 let baseCount = 0;
@@ -58,6 +58,24 @@ async function handleRequest(request: WorkerRequest) {
     const newKey = selected.day ? `${operationalMt(selected)}\u0000${selected.day}` : "";
     const updates = currentPoints.filter((point) => point.id === id || (point.day && (`${operationalMt(point)}\u0000${point.day}` === oldKey || `${operationalMt(point)}\u0000${point.day}` === newKey)));
     return { updates, notices: [{ type: "info", text: "Cambio manual aplicado. Revisa el indicador de forecast antes de exportar." }] as Notice[] };
+  }
+  if (request.type === "bulk-move") {
+    const ids = new Set((payload.ids as string[] | undefined) ?? []);
+    const newDay = payload.day == null ? null : Number(payload.day);
+    if (!ids.size) throw new Error("No hay puntos seleccionados.");
+    const affectedGroups = new Set<string>();
+    let changed = 0;
+    currentPoints.forEach((point) => {
+      if (!ids.has(point.id)) return;
+      if (point.day) affectedGroups.add(`${operationalMt(point)}\u0000${point.day}`);
+      point.day = newDay;
+      if (point.day) affectedGroups.add(`${operationalMt(point)}\u0000${point.day}`);
+      changed++;
+    });
+    if (!changed) throw new Error("Los puntos seleccionados ya no están disponibles.");
+    refreshAverages(currentPoints);
+    const updates = currentPoints.filter((point) => ids.has(point.id) || (point.day && affectedGroups.has(`${operationalMt(point)}\u0000${point.day}`)));
+    return { updates, notices: [{ type: "info", text: `${changed} puntos cambiaron en bloque al día ${newDay ?? "sin asignar"}. Revisa el cumplimiento del forecast antes de exportar.` }] as Notice[] };
   }
   if (request.type === "qa") {
     if (!forecast) throw new Error("No hay forecast cargado.");

@@ -17,4 +17,12 @@
   font-weight: 900;
   line-height: 1;
   box-shadow: 0 1px 4px rgba(16, 42, 67, .3);
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+.selectedLabel {
+  z-index: 500;
+  transform: scale(1.28);
+  background: #fff4bf;
+  box-shadow: 0 0 0 4px rgba(113, 72, 232, .25), 0 3px 8px rgba(16, 42, 67, .35);
 }
