@@ -388,6 +388,110 @@ export async function roadTimeMatrix(points: Point[]) {
   return result.map((row, a) => row.map((value, b) => (value + result[b][a]) / 2));
 }
 
+type SmartQaCandidate = { mt: string; dayA: number; dayB: number; severity: number };
+
+function averageDistanceTo(point: Point, group: Point[], excludeSelf = false) {
+  let total = 0, count = 0;
+  group.forEach((other) => {
+    if (excludeSelf && other.id === point.id) return;
+    total += meters(point, other); count++;
+  });
+  return count ? total / count : 0;
+}
+
+function pairwiseDistanceMean(group: Point[]) {
+  let total = 0, pairs = 0;
+  for (let first = 0; first < group.length; first++) for (let second = first + 1; second < group.length; second++) {
+    total += meters(group[first], group[second]); pairs++;
+  }
+  return pairs ? total / pairs : 0;
+}
+
+function smartQaCandidates(points: Point[]) {
+  const byMt = new Map<string, Map<number, Point[]>>();
+  points.forEach((point) => {
+    if (point.kind !== "Titular" || !point.day) return;
+    const mt = operationalMt(point), days = byMt.get(mt) ?? new Map<number, Point[]>(), group = days.get(point.day) ?? [];
+    group.push(point); days.set(point.day, group); byMt.set(mt, days);
+  });
+  const candidates: SmartQaCandidate[] = [];
+  byMt.forEach((daily, mt) => {
+    const groups = [...daily.entries()].sort((a, b) => a[0] - b[0]);
+    const mtCandidates: SmartQaCandidate[] = [];
+    for (let first = 0; first < groups.length; first++) for (let second = first + 1; second < groups.length; second++) {
+      const [dayA, titlesA] = groups[first], [dayB, titlesB] = groups[second];
+      if (titlesA.length + titlesB.length > 90) continue;
+      const withinA = pairwiseDistanceMean(titlesA), withinB = pairwiseDistanceMean(titlesB);
+      const gainA = titlesA.reduce((best, point) => {
+        const own = averageDistanceTo(point, titlesA, true), other = averageDistanceTo(point, titlesB);
+        return Math.max(best, own > 0 ? (own - other) / own : 0);
+      }, 0);
+      const gainB = titlesB.reduce((best, point) => {
+        const own = averageDistanceTo(point, titlesB, true), other = averageDistanceTo(point, titlesA);
+        return Math.max(best, own > 0 ? (own - other) / own : 0);
+      }, 0);
+      let nearestCross = Infinity;
+      titlesA.forEach((titleA) => titlesB.forEach((titleB) => { nearestCross = Math.min(nearestCross, meters(titleA, titleB)); }));
+      const dispersion = Math.max(withinA, withinB, 1);
+      const mutualGain = Math.min(gainA, gainB);
+      const severity = mutualGain > 0.04
+        ? 10 + gainA + gainB
+        : dispersion > 2500 && nearestCross < dispersion * 0.3 ? 1 - nearestCross / dispersion : 0;
+      if (severity > 0.08) mtCandidates.push({ mt, dayA, dayB, severity });
+    }
+    mtCandidates.sort((a, b) => b.severity - a.severity);
+    candidates.push(...mtCandidates.slice(0, 2));
+  });
+  return candidates.sort((a, b) => b.severity - a.severity).slice(0, 24);
+}
+
+export async function runSmartRoadQa(points: Point[], forecast: Forecast, onProgress?: (text: string) => void) {
+  const next = points.map((point) => ({ ...point }));
+  const originalDays = new Map(next.filter((point) => point.kind === "Titular").map((point) => [point.id, point.day]));
+  const candidates = smartQaCandidates(next);
+  if (!candidates.length) return {
+    points: next,
+    notices: [{ type: "info", text: "QA vial automático: no se detectaron cruces espaciales que necesitaran validación por carretera." }] as Notice[],
+  };
+  let reviewed = 0, failed = 0, swaps = 0, improvedPairs = 0, savedSeconds = 0;
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
+    onProgress?.(`QA vial automático ${index + 1}/${candidates.length}: ${candidate.mt}, días ${candidate.dayA} y ${candidate.dayB}…`);
+    const titles = next.filter((point) => point.kind === "Titular" && operationalMt(point) === candidate.mt && (point.day === candidate.dayA || point.day === candidate.dayB));
+    if (titles.length < 2 || titles.length > 90) continue;
+    try {
+      const matrix = await roadTimeMatrix(titles);
+      const labels = titles.map((point) => point.day === candidate.dayA ? 0 : 1);
+      const before = withinClusterMean(labels, matrix);
+      const pairSwaps = refineClusterSwaps(labels, matrix, Math.min(24, titles.length));
+      const after = withinClusterMean(labels, matrix);
+      const improvement = before - after;
+      if (pairSwaps > 0 && improvement >= 30 && improvement / Math.max(before, 1) >= 0.02) {
+        titles.forEach((point, titleIndex) => { point.day = labels[titleIndex] === 0 ? candidate.dayA : candidate.dayB; });
+        swaps += pairSwaps; improvedPairs++; savedSeconds += improvement;
+      }
+      reviewed++;
+    } catch {
+      failed++;
+    }
+    if (index < candidates.length - 1) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const changedPoints = next.filter((point) => point.kind === "Titular" && point.day !== originalDays.get(point.id)).length;
+  if (changedPoints) {
+    const ignoredNotices: Notice[] = [];
+    allocateSpares(next, forecast, ignoredNotices);
+    refreshAverages(next);
+  }
+  const notices: Notice[] = [{
+    type: "info",
+    text: changedPoints
+      ? `QA vial automático: ${reviewed} cruces revisados en ${new Set(candidates.map((candidate) => candidate.mt)).size} MT; ${changedPoints} titular${changedPoints === 1 ? "" : "es"} cambiaron de día mediante ${swaps} intercambio${swaps === 1 ? "" : "s"}. Mejora media acumulada: ${(savedSeconds / Math.max(improvedPairs, 1) / 60).toFixed(1)} minutos por cruce corregido.`
+      : `QA vial automático: ${reviewed} cruces sospechosos fueron revisados y la asignación ya era estable según los tiempos de conducción.`,
+  }];
+  if (failed) notices.push({ type: "info", text: `${failed} validaciones viales no pudieron consultarse; esos grupos conservaron su asignación original.` });
+  return { points: next, notices };
+}
+
 export async function runRoadQa(points: Point[], forecast: Forecast, mt: string) {
   const titles = points.filter((point) => operationalMt(point) === mt && point.kind === "Titular" && point.day);
   if (titles.length < 2) throw new Error(`${mt}: no hay suficientes titulares asignados para ejecutar el QA vial.`);

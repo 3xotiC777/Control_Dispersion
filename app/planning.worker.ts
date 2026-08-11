@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import * as XLSX from "xlsx";
-import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, refreshAverages, runRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
+import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
 
 type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
@@ -44,9 +44,11 @@ async function handleRequest(request: WorkerRequest) {
     progress(`Preparando ${baseCount.toLocaleString()} registros…`);
     const sourcePoints = extractPoints(parseWorkbook(baseBuffer));
     progress("Agrupando titulares y asignando suplentes…");
-    const result = assign(sourcePoints, forecast);
-    currentPoints = result.points;
-    return result;
+    const initial = assign(sourcePoints, forecast);
+    progress("Detectando cruces que necesitan QA vial…");
+    const smartQa = await runSmartRoadQa(initial.points, forecast, progress);
+    currentPoints = smartQa.points;
+    return { points: smartQa.points, notices: [...smartQa.notices, ...initial.notices] };
   }
   if (request.type === "move") {
     const id = String(payload.id), newDay = payload.day == null ? null : Number(payload.day);
