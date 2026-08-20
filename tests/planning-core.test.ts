@@ -29,6 +29,14 @@ test("multiplica por tres los titulares cuando no existen suplentes", () => {
   assert.match(result.notices[0].text, /Modo sin suplentes/);
 });
 
+test("asigna todos los titulares aunque superen la meta forecast por tres", () => {
+  const titles = Array.from({ length: 10 }, (_, index) => point(index, index < 4 ? index * 0.001 : 1 + index * 0.001));
+  const result = assign(titles, { MT1: { 1: 1, 2: 1 } });
+  assert.equal(result.mode, "titles-only");
+  assert.equal(result.points.filter((item) => item.day).length, titles.length);
+  assert.equal(result.points.filter((item) => !item.day).length, 0);
+});
+
 test("prioriza una agrupación clara sobre la capacidad exacta 1:3", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 1), point(4, 1.001), point(5, 1.002), point(6, 1.003)];
   const result = assign(titles, { MT1: { 1: 1, 2: 1 } });

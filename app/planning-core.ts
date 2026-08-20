@@ -285,7 +285,7 @@ function capacitatedClusters(points: Point[], capacities: number[], flexible = f
 
 function proportionalPlans(days: Array<{ day: number; count: number }>, available: number, multiplier: number) {
   const requested = days.reduce((sum, plan) => sum + plan.count * multiplier, 0);
-  const assignable = Math.min(available, requested);
+  const assignable = available;
   if (!requested || !assignable) return [];
   const allocations = days.map((plan) => {
     const exact = plan.count * multiplier * assignable / requested;
@@ -413,7 +413,7 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     if (titles.length < needed) notices.push({ type: "warn", text: mode === "titles-only"
       ? `${mt}: la meta 1:3 pide ${needed} titulares y la base tiene ${titles.length}. Se distribuyeron todos los disponibles proporcionalmente entre los días.`
       : `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
-    const selectedTitles = denseSubset(titles, Math.min(needed, titles.length));
+    const selectedTitles = mode === "titles-only" ? [...titles] : denseSubset(titles, Math.min(needed, titles.length));
     let remaining = selectedTitles.length;
     const effectiveDays = mode === "titles-only"
       ? proportionalPlans(days, selectedTitles.length, multiplier)
@@ -424,7 +424,7 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     selectedTitles.forEach((point, index) => { point.day = effectiveDays[labels[index]]?.day ?? null; point.assignedMt = point.day ? mt : null; });
   });
   if (mode === "with-spares") allocateSpares(next, forecast, notices);
-  else notices.unshift({ type: "info", text: `Modo sin suplentes detectado: la meta por día es 3 × forecast y la compacidad espacial tiene prioridad. ${flexibleMoves ? `${flexibleMoves} punto${flexibleMoves === 1 ? "" : "s"} cambiaron de grupo para reducir la dispersión, aunque la cantidad diaria pueda variar ligeramente.` : "La distribución alcanzó la mejor agrupación encontrada sin necesitar desviarse de la meta diaria."}` });
+  else notices.unshift({ type: "info", text: `Modo sin suplentes detectado: se asignaron todos los titulares; la meta por día es 3 × forecast y la compacidad espacial tiene prioridad. ${flexibleMoves ? `${flexibleMoves} punto${flexibleMoves === 1 ? "" : "s"} cambiaron de grupo para reducir la dispersión, aunque la cantidad diaria pueda variar frente a la meta.` : "La distribución alcanzó la mejor agrupación encontrada sin necesitar desviarse de la meta diaria."}` });
   return { points: refreshAverages(next), notices, mode };
 }
 
