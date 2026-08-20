@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import * as XLSX from "xlsx";
-import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
+import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
 
 type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
@@ -42,13 +42,15 @@ async function handleRequest(request: WorkerRequest) {
   if (request.type === "calculate") {
     if (!baseBuffer || !forecast) throw new Error("Carga la base de puntos y el forecast antes de calcular.");
     progress(`Preparando ${baseCount.toLocaleString()} registros…`);
-    const sourcePoints = extractPoints(parseWorkbook(baseBuffer));
-    progress("Agrupando titulares y asignando suplentes…");
-    const initial = assign(sourcePoints, forecast);
+    const sourceRows = parseWorkbook(baseBuffer);
+    const mode = planningModeFromRows(sourceRows);
+    const sourcePoints = extractPoints(sourceRows);
+    progress(mode === "with-spares" ? "Agrupando titulares y asignando suplentes…" : "Agrupando titulares con meta flexible 1:3…");
+    const initial = assign(sourcePoints, forecast, mode);
     progress("Detectando cruces que necesitan QA vial…");
     const smartQa = await runSmartRoadQa(initial.points, forecast, progress);
     currentPoints = smartQa.points;
-    return { points: smartQa.points, notices: [...smartQa.notices, ...initial.notices] };
+    return { points: smartQa.points, notices: [...smartQa.notices, ...initial.notices], mode: initial.mode };
   }
   if (request.type === "move") {
     const id = String(payload.id), newDay = payload.day == null ? null : Number(payload.day);
