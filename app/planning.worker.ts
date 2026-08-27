@@ -45,7 +45,7 @@ async function handleRequest(request: WorkerRequest) {
     const sourceRows = parseWorkbook(baseBuffer);
     const mode = planningModeFromRows(sourceRows);
     const sourcePoints = extractPoints(sourceRows);
-    progress(mode === "with-spares" ? "Agrupando titulares y asignando suplentes…" : "Agrupando titulares con meta flexible 1:3…");
+    progress(mode === "with-spares" ? "Agrupando titulares y asignando suplentes…" : "Agrupando titulares según las cuotas exactas del forecast…");
     const initial = assign(sourcePoints, forecast, mode);
     progress("Detectando cruces que necesitan QA vial…");
     const smartQa = await runSmartRoadQa(initial.points, forecast, progress);

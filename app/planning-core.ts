@@ -215,51 +215,9 @@ export function refineClusterSwaps(labels: number[], matrix: number[][], maxSwap
   return swaps;
 }
 
-function refineFlexibleMoves(labels: number[], matrix: number[][], targets: number[], maxMoves: number) {
-  if (labels.length < 2 || targets.length < 2) return 0;
-  const clusterCount = targets.length;
-  const sizes = Array(clusterCount).fill(0);
-  labels.forEach((label) => sizes[label]++);
-  const sums = matrix.map(() => Array(clusterCount).fill(0));
-  for (let point = 0; point < matrix.length; point++) for (let other = 0; other < matrix.length; other++) sums[point][labels[other]] += matrix[point][other];
-  const moved = new Set<number>();
-  let moves = 0;
-  while (moves < maxMoves) {
-    let bestPoint = -1, bestCluster = -1, bestGain = 0;
-    for (let point = 0; point < labels.length; point++) {
-      if (moved.has(point)) continue;
-      const current = labels[point];
-      if (sizes[current] <= 1) continue;
-      const ownAverage = sums[point][current] / (sizes[current] - 1);
-      for (let candidate = 0; candidate < clusterCount; candidate++) {
-        if (candidate === current || sizes[candidate] === 0) continue;
-        const otherAverage = sums[point][candidate] / sizes[candidate];
-        const gain = ownAverage - otherAverage;
-        const deviationBefore = Math.abs(sizes[current] - targets[current]) + Math.abs(sizes[candidate] - targets[candidate]);
-        const deviationAfter = Math.abs(sizes[current] - 1 - targets[current]) + Math.abs(sizes[candidate] + 1 - targets[candidate]);
-        const worsensTarget = deviationAfter > deviationBefore;
-        const requiredGain = worsensTarget ? Math.max(250, ownAverage * 0.25) : Math.max(100, ownAverage * 0.1);
-        if (gain >= requiredGain && gain > bestGain) { bestPoint = point; bestCluster = candidate; bestGain = gain; }
-      }
-    }
-    if (bestPoint < 0) break;
-    const previous = labels[bestPoint];
-    labels[bestPoint] = bestCluster;
-    sizes[previous]--;
-    sizes[bestCluster]++;
-    for (let point = 0; point < labels.length; point++) {
-      sums[point][previous] -= matrix[point][bestPoint];
-      sums[point][bestCluster] += matrix[point][bestPoint];
-    }
-    moved.add(bestPoint);
-    moves++;
-  }
-  return moves;
-}
-
-function capacitatedClusters(points: Point[], capacities: number[], flexible = false, customMatrix?: number[][]) {
-  if (!points.length) return { labels: [] as number[], flexibleMoves: 0 };
-  if (capacities.length === 1) return { labels: Array(points.length).fill(0), flexibleMoves: 0 };
+function capacitatedClusters(points: Point[], capacities: number[], customMatrix?: number[][]) {
+  if (!points.length) return [] as number[];
+  if (capacities.length === 1) return Array(points.length).fill(0);
   const matrix = customMatrix ?? pointDistanceMatrix(points);
   let medoids = initialMedoids(matrix, capacities.length);
   let labels = exactCapacityAssignment(matrix, medoids, capacities);
@@ -279,22 +237,7 @@ function capacitatedClusters(points: Point[], capacities: number[], flexible = f
     labels = exactCapacityAssignment(matrix, medoids, capacities);
   }
   refineClusterSwaps(labels, matrix, points.length > 300 ? 36 : 90);
-  const flexibleMoves = flexible ? refineFlexibleMoves(labels, matrix, capacities, Math.min(points.length, points.length > 300 ? 120 : 240)) : 0;
-  return { labels, flexibleMoves };
-}
-
-function proportionalPlans(days: Array<{ day: number; count: number }>, available: number, multiplier: number) {
-  const requested = days.reduce((sum, plan) => sum + plan.count * multiplier, 0);
-  const assignable = available;
-  if (!requested || !assignable) return [];
-  const allocations = days.map((plan) => {
-    const exact = plan.count * multiplier * assignable / requested;
-    return { day: plan.day, count: Math.floor(exact), remainder: exact - Math.floor(exact) };
-  });
-  let remaining = assignable - allocations.reduce((sum, plan) => sum + plan.count, 0);
-  allocations.sort((a, b) => b.remainder - a.remainder || a.day - b.day);
-  for (let index = 0; index < allocations.length && remaining > 0; index++, remaining--) allocations[index].count++;
-  return allocations.sort((a, b) => a.day - b.day).filter((plan) => plan.count > 0);
+  return labels;
 }
 
 export function refreshAverages(points: Point[]) {
@@ -401,30 +344,22 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
   const next = points.map((point) => ({ ...point, day: null, assignedMt: null, avgMeters: null }));
   const notices: Notice[] = [];
   const mode: PlanningMode = detectedMode ?? (next.some((point) => point.kind === "Suplente") ? "with-spares" : "titles-only");
-  const multiplier = mode === "titles-only" ? 3 : 1;
-  let flexibleMoves = 0;
   const byMt = new Map<string, Point[]>();
   next.forEach((point) => { const list = byMt.get(point.mt) ?? []; list.push(point); byMt.set(point.mt, list); });
   Object.entries(forecast).forEach(([mt, daily]) => {
     const all = byMt.get(mt) ?? [], titles = all.filter((point) => point.kind === "Titular");
     const days = Object.entries(daily).map(([day, count]) => ({ day: Number(day), count })).sort((a, b) => a.day - b.day);
-    const needed = days.reduce((sum, plan) => sum + plan.count * multiplier, 0);
+    const needed = days.reduce((sum, plan) => sum + plan.count, 0);
     if (!all.length) { notices.push({ type: "warn", text: `${mt}: no hay puntos con coordenadas en la base.` }); return; }
-    if (titles.length < needed) notices.push({ type: "warn", text: mode === "titles-only"
-      ? `${mt}: la meta 1:3 pide ${needed} titulares y la base tiene ${titles.length}. Se distribuyeron todos los disponibles proporcionalmente entre los días.`
-      : `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
-    const selectedTitles = mode === "titles-only" ? [...titles] : denseSubset(titles, Math.min(needed, titles.length));
+    if (titles.length < needed) notices.push({ type: "warn", text: `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
+    const selectedTitles = denseSubset(titles, Math.min(needed, titles.length));
     let remaining = selectedTitles.length;
-    const effectiveDays = mode === "titles-only"
-      ? proportionalPlans(days, selectedTitles.length, multiplier)
-      : days.map((plan) => { const count = Math.min(plan.count, remaining); remaining -= count; return { ...plan, count }; }).filter((plan) => plan.count > 0);
-    const clustered = capacitatedClusters(selectedTitles, effectiveDays.map((plan) => plan.count), mode === "titles-only");
-    const labels = clustered.labels;
-    flexibleMoves += clustered.flexibleMoves;
+    const effectiveDays = days.map((plan) => { const count = Math.min(plan.count, remaining); remaining -= count; return { ...plan, count }; }).filter((plan) => plan.count > 0);
+    const labels = capacitatedClusters(selectedTitles, effectiveDays.map((plan) => plan.count));
     selectedTitles.forEach((point, index) => { point.day = effectiveDays[labels[index]]?.day ?? null; point.assignedMt = point.day ? mt : null; });
   });
   if (mode === "with-spares") allocateSpares(next, forecast, notices);
-  else notices.unshift({ type: "info", text: `Modo sin suplentes detectado: se asignaron todos los titulares; la meta por día es 3 × forecast y la compacidad espacial tiene prioridad. ${flexibleMoves ? `${flexibleMoves} punto${flexibleMoves === 1 ? "" : "s"} cambiaron de grupo para reducir la dispersión, aunque la cantidad diaria pueda variar frente a la meta.` : "La distribución alcanzó la mejor agrupación encontrada sin necesitar desviarse de la meta diaria."}` });
+  else notices.unshift({ type: "info", text: "Modo solo titulares detectado: se asignó por MT FINAL y día la cantidad indicada en el forecast, sin aplicar la relación 1:3. Los titulares excedentes quedaron sin día." });
   return { points: refreshAverages(next), notices, mode };
 }
 
