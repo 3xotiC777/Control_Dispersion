@@ -240,6 +240,53 @@ function capacitatedClusters(points: Point[], capacities: number[], customMatrix
   return labels;
 }
 
+type SequencedDayGroup = {
+  day: number;
+  points: Point[];
+  center: { lat: number; lng: number };
+};
+
+const dayGroupCenter = (points: Point[]) => ({
+  lat: points.reduce((sum, point) => sum + point.lat, 0) / points.length,
+  lng: points.reduce((sum, point) => sum + point.lng, 0) / points.length,
+});
+
+export function sequenceDaysByProximity(points: Point[]) {
+  const byMt = new Map<string, Map<number, Point[]>>();
+  points.forEach((point) => {
+    if (point.kind !== "Titular" || !point.day) return;
+    const mt = operationalMt(point), daily = byMt.get(mt) ?? new Map<number, Point[]>(), group = daily.get(point.day) ?? [];
+    group.push(point); daily.set(point.day, group); byMt.set(mt, daily);
+  });
+  let changedPoints = 0, reorderedGroups = 0, reorderedMts = 0;
+  byMt.forEach((daily) => {
+    const groups: SequencedDayGroup[] = [...daily.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([day, groupPoints]) => ({ day, points: groupPoints, center: dayGroupCenter(groupPoints) }));
+    if (groups.length < 3) return;
+    const anchor = groups[0], remaining = groups.slice(1), dayMap = new Map<number, number>([[anchor.day, anchor.day]]);
+    groups.slice(1).forEach((target) => {
+      const compatible = remaining
+        .filter((candidate) => candidate.points.length === target.points.length)
+        .sort((a, b) => meters(anchor.center, a.center) - meters(anchor.center, b.center) || a.day - b.day);
+      const chosen = compatible[0];
+      if (!chosen) return;
+      dayMap.set(chosen.day, target.day);
+      remaining.splice(remaining.indexOf(chosen), 1);
+    });
+    const changedGroups = [...dayMap].filter(([previous, next]) => previous !== next).length;
+    if (!changedGroups) return;
+    reorderedGroups += changedGroups;
+    reorderedMts++;
+    groups.forEach((group) => group.points.forEach((point) => {
+      const sequencedDay = dayMap.get(group.day) ?? group.day;
+      if (sequencedDay !== point.day) changedPoints++;
+      point.day = sequencedDay;
+    }));
+  });
+  return { changedPoints, reorderedGroups, reorderedMts };
+}
+
 export function refreshAverages(points: Point[]) {
   const groups = new Map<string, { titles: Point[]; members: Point[] }>();
   points.forEach((point) => {
@@ -357,6 +404,11 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     const effectiveDays = days.map((plan) => { const count = Math.min(plan.count, remaining); remaining -= count; return { ...plan, count }; }).filter((plan) => plan.count > 0);
     const labels = capacitatedClusters(selectedTitles, effectiveDays.map((plan) => plan.count));
     selectedTitles.forEach((point, index) => { point.day = effectiveDays[labels[index]]?.day ?? null; point.assignedMt = point.day ? mt : null; });
+  });
+  const sequencing = sequenceDaysByProximity(next);
+  if (sequencing.reorderedGroups) notices.unshift({
+    type: "info",
+    text: `Secuencia geográfica: se renumeraron ${sequencing.reorderedGroups} grupos diarios en ${sequencing.reorderedMts} MT FINAL, desde el primer día hacia los grupos más lejanos, sin mover puntos entre grupos ni alterar las cuotas del forecast.`,
   });
   if (mode === "with-spares") allocateSpares(next, forecast, notices);
   else notices.unshift({ type: "info", text: "Modo solo titulares detectado: se asignó por MT FINAL y día la cantidad indicada en el forecast, sin aplicar la relación 1:3. Los titulares excedentes quedaron sin día." });
