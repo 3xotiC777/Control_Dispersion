@@ -29,7 +29,7 @@ test("usa las cantidades exactas del forecast cuando no existen suplentes", () =
   assert.equal(result.points.filter((item) => item.day).length, 3);
   const counts = [1, 2].map((day) => result.points.filter((item) => item.day === day).length);
   assert.deepEqual(counts, [2, 1]);
-  assert.match(result.notices[0].text, /sin aplicar la relación 1:3/);
+  assert.match(result.notices[0].text, /no se aplicó la relación 1:3/);
 });
 
 test("deja sin día los titulares que exceden el forecast", () => {
@@ -50,23 +50,37 @@ test("mantiene las cuotas exactas mientras optimiza la agrupación", () => {
 test("renumera grupos completos desde el primer día hacia el más lejano", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 10), point(4, 10.001), point(5, 1), point(6, 1.001)];
   titles.forEach((item, index) => { item.day = index < 2 ? 1 : index < 4 ? 2 : 5; item.assignedMt = "MT1"; });
-  const result = sequenceDaysByProximity(titles);
-  assert.equal(result.changedPoints, 4);
+  const result = sequenceDaysByProximity(titles, { MT1: { 1: 2, 2: 2, 5: 2 } });
+  assert.equal(result.relabeledPoints, 4);
+  assert.equal(result.boundaryMoves, 0);
   assert.deepEqual(titles.filter((item) => item.day === 1).map((item) => item.id), ["1", "2"]);
   assert.deepEqual(titles.filter((item) => item.day === 2).map((item) => item.id), ["5", "6"]);
   assert.deepEqual(titles.filter((item) => item.day === 5).map((item) => item.id), ["3", "4"]);
 });
 
-test("solo intercambia grupos compatibles para conservar las cuotas diarias", () => {
+test("acepta grupos completos dentro de la tolerancia de dos puntos", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 10), point(4, 1), point(5, 1.001), point(6, 2)];
   titles.forEach((item, index) => { item.day = index < 2 ? 1 : index === 2 ? 2 : index < 5 ? 3 : 4; item.assignedMt = "MT1"; });
-  sequenceDaysByProximity(titles);
+  const result = sequenceDaysByProximity(titles, { MT1: { 1: 2, 2: 1, 3: 2, 4: 1 } });
+  assert.equal(result.boundaryMoves, 0);
   assert.equal(titles.filter((item) => item.day === 1).length, 2);
-  assert.equal(titles.filter((item) => item.day === 2).length, 1);
-  assert.equal(titles.filter((item) => item.day === 3).length, 2);
+  assert.equal(titles.filter((item) => item.day === 2).length, 2);
+  assert.equal(titles.filter((item) => item.day === 3).length, 1);
   assert.equal(titles.filter((item) => item.day === 4).length, 1);
-  assert.equal(titles.find((item) => item.id === "6")?.day, 2);
+  assert.equal(titles.find((item) => item.id === "4")?.day, 2);
+  assert.equal(titles.find((item) => item.id === "6")?.day, 3);
   assert.equal(titles.find((item) => item.id === "3")?.day, 4);
+});
+
+test("mueve el mínimo de fronterizos cuando la diferencia supera la tolerancia", () => {
+  const titles = [point(1, 0), point(2, 0.001), point(3, 10), point(4, 1), point(5, 1.001), point(6, 1.002), point(7, 1.003), point(8, 1.004)];
+  titles.forEach((item, index) => { item.day = index < 2 ? 1 : index === 2 ? 2 : 3; item.assignedMt = "MT1"; });
+  const result = sequenceDaysByProximity(titles, { MT1: { 1: 2, 2: 1, 3: 5 } });
+  assert.equal(result.boundaryMoves, 2);
+  assert.equal(result.unresolvedDays, 0);
+  assert.equal(titles.filter((item) => item.day === 1).length, 2);
+  assert.equal(titles.filter((item) => item.day === 2).length, 3);
+  assert.equal(titles.filter((item) => item.day === 3).length, 3);
 });
 
 test("detecta suplentes desde la columna SELECCION aunque sus coordenadas no sean utilizables", () => {

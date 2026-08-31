@@ -21,6 +21,7 @@ export type Notice = { type: "info" | "warn"; text: string };
 export type PlanningMode = "with-spares" | "titles-only";
 
 export const MAX_SUPPLEMENT_DISTANCE_METERS = 15000;
+export const DAY_FORECAST_TOLERANCE = 2;
 export const norm = (value: unknown) => String(value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 export const key = (value: unknown) => norm(value).replace(/[^A-Z0-9]/g, "");
 export const asNumber = (value: unknown) => {
@@ -243,48 +244,95 @@ function capacitatedClusters(points: Point[], capacities: number[], customMatrix
 type SequencedDayGroup = {
   day: number;
   points: Point[];
-  center: { lat: number; lng: number };
+  medoid: { lat: number; lng: number };
 };
 
-const dayGroupCenter = (points: Point[]) => ({
-  lat: points.reduce((sum, point) => sum + point.lat, 0) / points.length,
-  lng: points.reduce((sum, point) => sum + point.lng, 0) / points.length,
-});
+type BalancedDayGroup = SequencedDayGroup & {
+  expected: number;
+  lower: number;
+  upper: number;
+};
 
-export function sequenceDaysByProximity(points: Point[]) {
+const dayGroupMedoid = (points: Point[]) => {
+  if (points.length === 1) return { lat: points[0].lat, lng: points[0].lng };
+  let best = points[0], bestCost = Infinity;
+  points.forEach((candidate) => {
+    const cost = points.reduce((sum, other) => sum + meters(candidate, other), 0);
+    if (cost < bestCost) { best = candidate; bestCost = cost; }
+  });
+  return { lat: best.lat, lng: best.lng };
+};
+
+function rebalanceDayTolerance(groups: BalancedDayGroup[], anchorDay: number) {
+  const totalPoints = groups.reduce((sum, group) => sum + group.points.length, 0);
+  let boundaryMoves = 0;
+  while (boundaryMoves < totalPoints) {
+    const mandatorySources = groups.filter((group) => group.points.length > group.upper);
+    const mandatoryDestinations = groups.filter((group) => group.points.length < group.lower);
+    if (!mandatorySources.length && !mandatoryDestinations.length) break;
+    const sources = mandatorySources.length ? mandatorySources : groups.filter((group) => group.points.length > group.lower);
+    const destinations = mandatoryDestinations.length ? mandatoryDestinations : groups.filter((group) => group.points.length < group.upper);
+    if (!sources.length || !destinations.length) break;
+    const medoids = new Map(groups.map((group) => [group.day, dayGroupMedoid(group.points)]));
+    let bestSource: BalancedDayGroup | null = null, bestDestination: BalancedDayGroup | null = null, bestPoint: Point | null = null, bestCost = Infinity;
+    sources.forEach((source) => source.points.forEach((point) => destinations.forEach((destination) => {
+      if (source.day === destination.day) return;
+      const anchorPenalty = source.day === anchorDay || destination.day === anchorDay ? 1_000_000_000 : 0;
+      const cost = meters(point, medoids.get(destination.day)!) - meters(point, medoids.get(source.day)!) + anchorPenalty;
+      if (cost < bestCost || (cost === bestCost && `${source.day}:${destination.day}:${point.id}` < `${bestSource?.day}:${bestDestination?.day}:${bestPoint?.id}`)) {
+        bestSource = source; bestDestination = destination; bestPoint = point; bestCost = cost;
+      }
+    })));
+    if (!bestSource || !bestDestination || !bestPoint) break;
+    const pointIndex = bestSource.points.indexOf(bestPoint);
+    bestSource.points.splice(pointIndex, 1);
+    bestDestination.points.push(bestPoint);
+    bestPoint.day = bestDestination.day;
+    boundaryMoves++;
+  }
+  const unresolvedDays = groups.filter((group) => group.points.length < group.lower || group.points.length > group.upper).length;
+  return { boundaryMoves, unresolvedDays };
+}
+
+export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onlyMt?: string) {
   const byMt = new Map<string, Map<number, Point[]>>();
   points.forEach((point) => {
     if (point.kind !== "Titular" || !point.day) return;
-    const mt = operationalMt(point), daily = byMt.get(mt) ?? new Map<number, Point[]>(), group = daily.get(point.day) ?? [];
+    const mt = operationalMt(point);
+    if (onlyMt && mt !== onlyMt) return;
+    const daily = byMt.get(mt) ?? new Map<number, Point[]>(), group = daily.get(point.day) ?? [];
     group.push(point); daily.set(point.day, group); byMt.set(mt, daily);
   });
-  let changedPoints = 0, reorderedGroups = 0, reorderedMts = 0;
-  byMt.forEach((daily) => {
+  let relabeledPoints = 0, boundaryMoves = 0, reorderedGroups = 0, reorderedMts = 0, unresolvedDays = 0;
+  byMt.forEach((daily, mt) => {
     const groups: SequencedDayGroup[] = [...daily.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([day, groupPoints]) => ({ day, points: groupPoints, center: dayGroupCenter(groupPoints) }));
-    if (groups.length < 3) return;
-    const anchor = groups[0], remaining = groups.slice(1), dayMap = new Map<number, number>([[anchor.day, anchor.day]]);
-    groups.slice(1).forEach((target) => {
-      const compatible = remaining
-        .filter((candidate) => candidate.points.length === target.points.length)
-        .sort((a, b) => meters(anchor.center, a.center) - meters(anchor.center, b.center) || a.day - b.day);
-      const chosen = compatible[0];
-      if (!chosen) return;
-      dayMap.set(chosen.day, target.day);
-      remaining.splice(remaining.indexOf(chosen), 1);
+      .map(([day, groupPoints]) => ({ day, points: groupPoints, medoid: dayGroupMedoid(groupPoints) }));
+    if (groups.length < 2) return;
+    const anchor = groups[0];
+    const ordered = [anchor, ...groups.slice(1).sort((a, b) => meters(anchor.medoid, a.medoid) - meters(anchor.medoid, b.medoid) || a.day - b.day)];
+    const balanced: BalancedDayGroup[] = groups.map((target, index) => {
+      const source = ordered[index], expected = forecast[mt]?.[target.day] ?? target.points.length;
+      if (source.day !== target.day) reorderedGroups++;
+      source.points.forEach((point) => {
+        if (point.day !== target.day) relabeledPoints++;
+        point.day = target.day;
+      });
+      return {
+        day: target.day,
+        points: source.points,
+        medoid: source.medoid,
+        expected,
+        lower: Math.max(0, expected - DAY_FORECAST_TOLERANCE),
+        upper: expected + DAY_FORECAST_TOLERANCE,
+      };
     });
-    const changedGroups = [...dayMap].filter(([previous, next]) => previous !== next).length;
-    if (!changedGroups) return;
-    reorderedGroups += changedGroups;
-    reorderedMts++;
-    groups.forEach((group) => group.points.forEach((point) => {
-      const sequencedDay = dayMap.get(group.day) ?? group.day;
-      if (sequencedDay !== point.day) changedPoints++;
-      point.day = sequencedDay;
-    }));
+    const rebalanced = rebalanceDayTolerance(balanced, anchor.day);
+    boundaryMoves += rebalanced.boundaryMoves;
+    unresolvedDays += rebalanced.unresolvedDays;
+    if (ordered.some((group, index) => group.day !== groups[index].day) || rebalanced.boundaryMoves) reorderedMts++;
   });
-  return { changedPoints, reorderedGroups, reorderedMts };
+  return { relabeledPoints, boundaryMoves, reorderedGroups, reorderedMts, unresolvedDays };
 }
 
 export function refreshAverages(points: Point[]) {
@@ -387,7 +435,21 @@ export function allocateSpares(next: Point[], forecast: Forecast, notices: Notic
   if (shortages.length > 30) notices.push({ type: "warn", text: `${shortages.length - 30} jornadas adicionales no alcanzaron la relación 1:3. La tabla conserva el detalle completo por MT y día.` });
 }
 
-export function assign(points: Point[], forecast: Forecast, detectedMode?: PlanningMode) {
+export function finalizeAssignment(points: Point[], forecast: Forecast, mode: PlanningMode, onlyMt?: string) {
+  const next = points.map((point) => ({ ...point }));
+  const notices: Notice[] = [];
+  const sequencing = sequenceDaysByProximity(next, forecast, onlyMt);
+  if (sequencing.reorderedGroups || sequencing.boundaryMoves) notices.push({
+    type: "info",
+    text: `Secuencia geográfica final: se renumeraron ${sequencing.reorderedGroups} grupos en ${sequencing.reorderedMts} MT FINAL. ${sequencing.boundaryMoves ? `${sequencing.boundaryMoves} titular${sequencing.boundaryMoves === 1 ? "" : "es"} fronterizo${sequencing.boundaryMoves === 1 ? "" : "s"} cambiaron de grupo` : "No fue necesario mover puntos entre grupos"}; se aceptó una tolerancia de ±${DAY_FORECAST_TOLERANCE} frente al forecast.`,
+  });
+  if (sequencing.unresolvedDays) notices.push({ type: "warn", text: `${sequencing.unresolvedDays} jornada${sequencing.unresolvedDays === 1 ? "" : "s"} no pudieron quedar dentro de la tolerancia ±${DAY_FORECAST_TOLERANCE} por falta de puntos compatibles.` });
+  if (mode === "with-spares") allocateSpares(next, forecast, notices);
+  else if (!onlyMt) notices.unshift({ type: "info", text: "Modo solo titulares detectado: no se aplicó la relación 1:3; se usó el forecast por MT FINAL y día, con tolerancia final de ±2 durante la secuenciación geográfica. Los titulares excedentes quedaron sin día." });
+  return { points: refreshAverages(next), notices };
+}
+
+export function assign(points: Point[], forecast: Forecast, detectedMode?: PlanningMode, options: { finalize?: boolean } = {}) {
   const next = points.map((point) => ({ ...point, day: null, assignedMt: null, avgMeters: null }));
   const notices: Notice[] = [];
   const mode: PlanningMode = detectedMode ?? (next.some((point) => point.kind === "Suplente") ? "with-spares" : "titles-only");
@@ -405,14 +467,9 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     const labels = capacitatedClusters(selectedTitles, effectiveDays.map((plan) => plan.count));
     selectedTitles.forEach((point, index) => { point.day = effectiveDays[labels[index]]?.day ?? null; point.assignedMt = point.day ? mt : null; });
   });
-  const sequencing = sequenceDaysByProximity(next);
-  if (sequencing.reorderedGroups) notices.unshift({
-    type: "info",
-    text: `Secuencia geográfica: se renumeraron ${sequencing.reorderedGroups} grupos diarios en ${sequencing.reorderedMts} MT FINAL, desde el primer día hacia los grupos más lejanos, sin mover puntos entre grupos ni alterar las cuotas del forecast.`,
-  });
-  if (mode === "with-spares") allocateSpares(next, forecast, notices);
-  else notices.unshift({ type: "info", text: "Modo solo titulares detectado: se asignó por MT FINAL y día la cantidad indicada en el forecast, sin aplicar la relación 1:3. Los titulares excedentes quedaron sin día." });
-  return { points: refreshAverages(next), notices, mode };
+  if (options.finalize === false) return { points: next, notices, mode };
+  const finalized = finalizeAssignment(next, forecast, mode);
+  return { points: finalized.points, notices: [...finalized.notices, ...notices], mode };
 }
 
 export function withinClusterMean(labels: number[], matrix: number[][]) {
@@ -505,7 +562,7 @@ function smartQaCandidates(points: Point[]) {
   return candidates.sort((a, b) => b.severity - a.severity).slice(0, 24);
 }
 
-export async function runSmartRoadQa(points: Point[], forecast: Forecast, onProgress?: (text: string) => void) {
+export async function runSmartRoadQa(points: Point[], onProgress?: (text: string) => void) {
   const next = points.map((point) => ({ ...point }));
   const originalDays = new Map(next.filter((point) => point.kind === "Titular").map((point) => [point.id, point.day]));
   const candidates = smartQaCandidates(next);
@@ -537,11 +594,6 @@ export async function runSmartRoadQa(points: Point[], forecast: Forecast, onProg
     if (index < candidates.length - 1) await new Promise((resolve) => setTimeout(resolve, 250));
   }
   const changedPoints = next.filter((point) => point.kind === "Titular" && point.day !== originalDays.get(point.id)).length;
-  if (changedPoints) {
-    const ignoredNotices: Notice[] = [];
-    allocateSpares(next, forecast, ignoredNotices);
-    refreshAverages(next);
-  }
   const notices: Notice[] = [{
     type: "info",
     text: changedPoints
@@ -552,7 +604,7 @@ export async function runSmartRoadQa(points: Point[], forecast: Forecast, onProg
   return { points: next, notices };
 }
 
-export async function runRoadQa(points: Point[], forecast: Forecast, mt: string) {
+export async function runRoadQa(points: Point[], mt: string) {
   const titles = points.filter((point) => operationalMt(point) === mt && point.kind === "Titular" && point.day);
   if (titles.length < 2) throw new Error(`${mt}: no hay suficientes titulares asignados para ejecutar el QA vial.`);
   const roadMatrix = await roadTimeMatrix(titles);
@@ -565,8 +617,6 @@ export async function runRoadQa(points: Point[], forecast: Forecast, mt: string)
   const changedDays = new Map(titles.map((point, index) => [point.id, days[labels[index]]]));
   const changedPoints = titles.filter((point) => changedDays.get(point.id) !== point.day).length;
   const next = points.map((point) => point.kind === "Titular" && changedDays.has(point.id) ? { ...point, day: changedDays.get(point.id)! } : { ...point });
-  const notices: Notice[] = [];
-  allocateSpares(next, forecast, notices);
-  notices.unshift({ type: "info", text: swaps ? `QA vial de ${mt}: ${changedPoints} titulares cambiaron de día mediante ${swaps} intercambios. El tiempo medio interno bajó de ${(beforeSeconds / 60).toFixed(1)} a ${(afterSeconds / 60).toFixed(1)} minutos.` : `QA vial de ${mt}: la distribución ya era estable según los tiempos de conducción; no se necesitaron intercambios.` });
-  return { points: refreshAverages(next), notices };
+  const notices: Notice[] = [{ type: "info", text: swaps ? `QA vial de ${mt}: ${changedPoints} titulares cambiaron de día mediante ${swaps} intercambios. El tiempo medio interno bajó de ${(beforeSeconds / 60).toFixed(1)} a ${(afterSeconds / 60).toFixed(1)} minutos.` : `QA vial de ${mt}: la distribución ya era estable según los tiempos de conducción; no se necesitaron intercambios.` }];
+  return { points: next, notices };
 }

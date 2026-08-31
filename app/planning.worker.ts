@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import * as XLSX from "xlsx";
-import { assign, baseColumns, extractForecast, extractPoints, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type Point, type Raw } from "./planning-core";
+import { assign, baseColumns, extractForecast, extractPoints, finalizeAssignment, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type PlanningMode, type Point, type Raw } from "./planning-core";
 
 type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
@@ -45,12 +45,14 @@ async function handleRequest(request: WorkerRequest) {
     const sourceRows = parseWorkbook(baseBuffer);
     const mode = planningModeFromRows(sourceRows);
     const sourcePoints = extractPoints(sourceRows);
-    progress(mode === "with-spares" ? "Agrupando, secuenciando días y asignando suplentes…" : "Agrupando y secuenciando días según el forecast…");
-    const initial = assign(sourcePoints, forecast, mode);
+    progress("Agrupando titulares según el forecast…");
+    const initial = assign(sourcePoints, forecast, mode, { finalize: false });
     progress("Detectando cruces que necesitan QA vial…");
-    const smartQa = await runSmartRoadQa(initial.points, forecast, progress);
-    currentPoints = smartQa.points;
-    return { points: smartQa.points, notices: [...smartQa.notices, ...initial.notices], mode: initial.mode };
+    const smartQa = await runSmartRoadQa(initial.points, progress);
+    progress(mode === "with-spares" ? "Ordenando días y asignando suplentes…" : "Ordenando los días desde el grupo más cercano al más lejano…");
+    const finalized = finalizeAssignment(smartQa.points, forecast, mode);
+    currentPoints = finalized.points;
+    return { points: finalized.points, notices: [...finalized.notices, ...smartQa.notices, ...initial.notices], mode: initial.mode };
   }
   if (request.type === "move") {
     const id = String(payload.id), newDay = payload.day == null ? null : Number(payload.day);
@@ -84,9 +86,12 @@ async function handleRequest(request: WorkerRequest) {
   if (request.type === "qa") {
     if (!forecast) throw new Error("No hay forecast cargado.");
     progress("Consultando carreteras y optimizando el MT…");
-    const result = await runRoadQa(currentPoints, forecast, String(payload.mt));
-    currentPoints = result.points;
-    return result;
+    const mt = String(payload.mt), qa = await runRoadQa(currentPoints, mt);
+    progress("Aplicando la secuencia geográfica final…");
+    const mode: PlanningMode = currentPoints.some((point) => point.kind === "Suplente") ? "with-spares" : "titles-only";
+    const finalized = finalizeAssignment(qa.points, forecast, mode, mt);
+    currentPoints = finalized.points;
+    return { points: finalized.points, notices: [...qa.notices, ...finalized.notices] };
   }
   if (request.type === "download") {
     if (!baseBuffer || !currentPoints.length) throw new Error("No hay una planificación para descargar.");
