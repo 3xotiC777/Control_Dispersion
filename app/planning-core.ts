@@ -133,6 +133,71 @@ export function extractPoints(rows: Raw[]): Point[] {
   return points;
 }
 
+export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast: Forecast; mode: PlanningMode } {
+  const fields = baseColumns(rows);
+  const dayColumn = column(rows, ["DIA", "DIAS", "DAY", "DIAASIGNADO", "JORNADA", "DIASIGNADO"]);
+  if (!dayColumn) throw new Error('No se encontró la columna de día ("DIA" o "DÍA") en la base asignada.');
+  const avgColumn = column(rows, ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"]);
+  const assignedMtColumn = column(rows, ["MTASIGNADO", "ASSIGNEDMT"]);
+  const countryColumn = column(rows, ["PAIS", "COUNTRY"]);
+  let validCoordinates = 0, swappedCoordinates = 0;
+  const coordinates = rows.map((row) => {
+    const lat = asNumber(row[fields.latitude]), lng = asNumber(row[fields.longitude]);
+    if (lat !== null && lng !== null) {
+      validCoordinates++;
+      if (Math.abs(lat) > 60 && Math.abs(lng) < 60) swappedCoordinates++;
+    }
+    return { lat, lng };
+  });
+  const likelySwapped = validCoordinates > 0 && swappedCoordinates > validCoordinates * 0.55;
+  const points: Point[] = [];
+  rows.forEach((row, sourceIndex) => {
+    const { lat, lng } = coordinates[sourceIndex];
+    if (lat === null || lng === null) return;
+    const selection = norm(row[fields.selection]);
+    const kind: Point["kind"] = selection === "T" || selection === "T PANEL" ? "Titular" : selection.startsWith("S") ? "Suplente" : "Otro";
+    if (kind === "Otro") return;
+    const refId = String(row[fields.refId] ?? sourceIndex + 1);
+    const dayVal = dayColumn ? asNumber(row[dayColumn]) : null;
+    const day = dayVal !== null && dayVal > 0 ? Math.round(dayVal) : null;
+    const avgVal = avgColumn ? asNumber(row[avgColumn]) : null;
+    const assignedMt = assignedMtColumn ? (String(row[assignedMtColumn] ?? "").trim() || null) : null;
+    points.push({
+      id: `${refId}-${sourceIndex}`,
+      sourceIndex,
+      refId,
+      name: String(row[fields.pdv] ?? refId),
+      mt: String(row[fields.mt] ?? "").trim(),
+      selection,
+      kind,
+      priorityRank: selectionPriority(selection, norm(countryColumn ? row[countryColumn] : "")),
+      lat: likelySwapped ? lng : lat,
+      lng: likelySwapped ? lat : lng,
+      day,
+      assignedMt,
+      avgMeters: avgVal,
+    });
+  });
+  refreshAverages(points);
+  const mode: PlanningMode = rows.some((row) => norm(row[fields.selection]).startsWith("S")) ? "with-spares" : "titles-only";
+  const derivedForecast: Forecast = {};
+  points.forEach((point) => {
+    const opMt = operationalMt(point);
+    if (!opMt || !point.day) return;
+    if (point.kind === "Titular" || mode === "titles-only") {
+      derivedForecast[opMt] ??= {};
+      derivedForecast[opMt][point.day] = (derivedForecast[opMt][point.day] ?? 0) + 1;
+    }
+  });
+  points.forEach((point) => {
+    const opMt = operationalMt(point);
+    if (!opMt || !point.day) return;
+    derivedForecast[opMt] ??= {};
+    derivedForecast[opMt][point.day] ??= 0;
+  });
+  return { points, forecast: derivedForecast, mode };
+}
+
 export const operationalMt = (point: Point) => point.assignedMt ?? point.mt;
 const groupKey = (mt: string, day: number) => `${mt}\u0000${day}`;
 const pointDistanceMatrix = (points: Point[]) => points.map((point) => points.map((other) => meters(point, other)));

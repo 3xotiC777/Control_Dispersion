@@ -1,9 +1,9 @@
 /// <reference lib="webworker" />
 
 import * as XLSX from "xlsx";
-import { assign, baseColumns, extractForecast, extractPoints, finalizeAssignment, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type PlanningMode, type Point, type Raw } from "./planning-core";
+import { assign, baseColumns, extractAssignedPoints, extractForecast, extractPoints, finalizeAssignment, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type PlanningMode, type Point, type Raw } from "./planning-core";
 
-type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
+type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "load-assigned" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
 let baseBuffer: ArrayBuffer | null = null;
 let baseCount = 0;
@@ -30,6 +30,24 @@ async function handleRequest(request: WorkerRequest) {
     baseCount = rows.length;
     currentPoints = [];
     return { count: rows.length };
+  }
+  if (request.type === "load-assigned") {
+    progress("Leyendo la base asignada en segundo plano…");
+    const buffer = payload.buffer as ArrayBuffer;
+    const rows = parseWorkbook(buffer);
+    baseColumns(rows);
+    baseBuffer = buffer;
+    baseCount = rows.length;
+    const extracted = extractAssignedPoints(rows);
+    currentPoints = extracted.points;
+    forecast = extracted.forecast;
+    return {
+      count: rows.length,
+      points: extracted.points,
+      forecast: extracted.forecast,
+      mode: extracted.mode,
+      assignedCount: extracted.points.filter((p) => p.day !== null).length,
+    };
   }
   if (request.type === "load-forecast") {
     progress("Leyendo el forecast…");
@@ -101,8 +119,10 @@ async function handleRequest(request: WorkerRequest) {
     const sheet = workbook.Sheets[workbook.SheetNames[0]] as unknown as Array<Array<DenseCell | undefined>> & { "!ref"?: string };
     const headers = (sheet[0] ?? []).map((cell) => cell?.v);
     const mtColumnIndex = headers.findIndex((header) => key(header) === "MTFINAL");
-    const dayColumnIndex = headers.length;
-    const averageColumnIndex = dayColumnIndex + 1;
+    let dayColumnIndex = headers.findIndex((header) => ["DIA", "DIAS", "DAY", "DIAASIGNADO", "JORNADA"].includes(key(header)));
+    if (dayColumnIndex < 0) dayColumnIndex = headers.length;
+    let averageColumnIndex = headers.findIndex((header) => ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"].includes(key(header)));
+    if (averageColumnIndex < 0) averageColumnIndex = dayColumnIndex === headers.length ? dayColumnIndex + 1 : headers.length;
     sheet[0] ??= [];
     sheet[0][dayColumnIndex] = { t: "s", v: "DIA" };
     sheet[0][averageColumnIndex] = { t: "s", v: "Promedio metros" };
@@ -116,7 +136,7 @@ async function handleRequest(request: WorkerRequest) {
       row[averageColumnIndex] = point?.avgMeters == null ? { t: "s", v: "" } : { t: "n", v: Math.round(point.avgMeters) };
     }
     const range = XLSX.utils.decode_range(sheet["!ref"] ?? `A1:A${baseCount + 1}`);
-    range.e.c = averageColumnIndex;
+    range.e.c = Math.max(range.e.c, dayColumnIndex, averageColumnIndex);
     sheet["!ref"] = XLSX.utils.encode_range(range);
     const buffer = XLSX.write(workbook, { type: "array", bookType: "xlsx", compression: true }) as ArrayBuffer;
     return { buffer };

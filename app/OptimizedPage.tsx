@@ -9,7 +9,7 @@ const GeoMap = dynamic(() => import("./GeoMap"), { ssr: false });
 const COLORS = ["#0b7285", "#7c3aed", "#e8590c", "#2f9e44", "#c2255c", "#1971c2", "#a61e4d", "#5f3dc4", "#087f5b", "#9c36b5"];
 const MT_PALETTE = ["#e8590c", "#7c3aed", "#0b7285", "#2f9e44", "#c2255c", "#1971c2", "#d6336c", "#5f3dc4", "#087f5b", "#f59f00", "#364fc7", "#9c36b5", "#099268", "#e03131", "#1098ad", "#2b8a3e", "#e67700", "#4c6ef5", "#ae3ec9", "#f76707", "#15aabf", "#40c057", "#fa5252", "#7950f2", "#fab005"];
 
-type Busy = "base" | "forecast" | "calculate" | "download" | "qa" | "move" | "bulk-move" | null;
+type Busy = "base" | "forecast" | "assigned" | "calculate" | "download" | "qa" | "move" | "bulk-move" | null;
 type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void };
 type WorkerResponse = { id?: number; type?: string; text?: string; ok?: boolean; payload?: unknown; error?: string };
 
@@ -60,6 +60,8 @@ export default function OptimizedPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
   const [progress, setProgress] = useState("");
+  const [uploadTab, setUploadTab] = useState<"new" | "assigned">("new");
+  const [isAssignedMode, setIsAssignedMode] = useState(false);
 
   useEffect(() => {
     const worker = new Worker(new URL("./planning.worker.ts", import.meta.url), { type: "module" });
@@ -116,11 +118,32 @@ export default function OptimizedPage() {
         const result = await workerCall("load-forecast", { buffer }, [buffer]) as { forecast: Forecast };
         setForecast(result.forecast);
       }
+      setIsAssignedMode(false);
       setPoints([]); setPlanningMode(null); setNotices([]); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setMt("all"); setSelectedDays([]);
     } catch (exception) {
       if (type === "base") setBaseInfo(null); else setForecast(null);
-      setPoints([]); setPlanningMode(null); setNotices([]);
+      setPoints([]); setPlanningMode(null); setNotices([]); setIsAssignedMode(false);
       setError(exception instanceof Error ? exception.message : "No se pudo leer el archivo.");
+    } finally { setBusy(null); setProgress(""); }
+  };
+
+  const handleAssignedFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || busy) return;
+    setBusy("assigned"); setError(""); setProgress("Leyendo la base asignada en segundo plano…");
+    try {
+      const buffer = await file.arrayBuffer();
+      const result = await workerCall("load-assigned", { buffer }, [buffer]) as { count: number; points: Point[]; forecast: Forecast; mode: PlanningMode; assignedCount: number };
+      setBaseInfo({ name: file.name, count: result.count });
+      setForecast(result.forecast);
+      setPoints(result.points);
+      setPlanningMode(result.mode);
+      setIsAssignedMode(true);
+      setNotices([{ type: "info", text: `Base cargada: ${result.points.length.toLocaleString()} puntos disponibles (${result.assignedCount.toLocaleString()} con día asignado). Sin recálculos aplicados.` }]);
+      setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setMt("all"); setSelectedDays([]); setPlanningVersion((version) => version + 1);
+    } catch (exception) {
+      setBaseInfo(null); setForecast(null); setPoints([]); setPlanningMode(null); setNotices([]); setIsAssignedMode(false);
+      setError(exception instanceof Error ? exception.message : "No se pudo leer la base asignada.");
     } finally { setBusy(null); setProgress(""); }
   };
 
@@ -129,6 +152,7 @@ export default function OptimizedPage() {
     setBusy("calculate"); setError(""); setProgress(`Optimizando ${baseInfo.count.toLocaleString()} registros…`);
     try {
       const result = await workerCall("calculate") as { points: Point[]; notices: Notice[]; mode: PlanningMode };
+      setIsAssignedMode(false);
       setPoints(result.points); setPlanningMode(result.mode); setNotices(result.notices); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setPlanningVersion((version) => version + 1);
     } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible calcular la asignación."); }
     finally { setBusy(null); setProgress(""); }
@@ -281,15 +305,62 @@ export default function OptimizedPage() {
 
   return <main className="app-shell"><div className="page-container">
     <header className="site-header animate-fade-up"><span className="brand-pill"><Layers3 size={14} /> Base de puntos + Forecast</span><h1><span>Ruta Compacta</span> para operación de campo</h1><p>Planifica puntos por cercanía, adapta automáticamente estudios con o sin suplentes y ejecuta un QA vial inteligente.</p></header>
-    <section className="upload-grid animate-fade-up">
-      <label className={baseInfo ? "file-card loaded" : "file-card"}><div className="file-card-top"><i><Database size={21} /></i>{baseInfo && <span className="ready-badge"><Check size={13} /> Listo</span>}</div><strong>Base de puntos</strong><p>{busy === "base" ? "Cargando sin bloquear la página…" : baseInfo ? `${baseInfo.count.toLocaleString()} registros cargados` : "Arrastra o haz clic para subir tu Excel"}</p><small>MT FINAL · SELECCIÓN · LATITUD · LONGITUD</small><input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={(event) => handleFile(event, "base")} /></label>
-      <label className={forecast ? "file-card loaded" : "file-card"}><div className="file-card-top"><i><LineChart size={21} /></i>{forecast && <span className="ready-badge"><Check size={13} /> Listo</span>}</div><strong>Forecast mensual</strong><p>{busy === "forecast" ? "Cargando forecast…" : forecast ? `${Object.keys(forecast).length} MT finales cargados` : "Arrastra o haz clic para subir tu Excel"}</p><small>MT FINAL en filas · días en columnas</small><input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={(event) => handleFile(event, "forecast")} /></label>
-      <button className="calculate" onClick={calculate} disabled={!baseInfo || !forecast || Boolean(busy)}>{busy === "calculate" ? <LoaderCircle className="spin" size={18} /> : <UploadCloud size={18} />} {busy === "calculate" ? "Calculando sin bloquear…" : "Calcular planificación"}</button>
-    </section>
+    <div className="upload-section animate-fade-up">
+      <div className="upload-tabs">
+        <button
+          type="button"
+          className={`upload-tab${uploadTab === "new" ? " active" : ""}`}
+          onClick={() => setUploadTab("new")}
+        >
+          <Sparkles size={16} /> Nueva planificación
+        </button>
+        <button
+          type="button"
+          className={`upload-tab${uploadTab === "assigned" ? " active" : ""}`}
+          onClick={() => setUploadTab("assigned")}
+        >
+          <Database size={16} /> Cargar base ya asignada
+        </button>
+      </div>
+      {uploadTab === "new" ? (
+        <section className="upload-grid">
+          <label className={baseInfo && !isAssignedMode ? "file-card loaded" : "file-card"}>
+            <div className="file-card-top"><i><Database size={21} /></i>{baseInfo && !isAssignedMode && <span className="ready-badge"><Check size={13} /> Listo</span>}</div>
+            <strong>Base de puntos</strong>
+            <p>{busy === "base" ? "Cargando sin bloquear la página…" : (baseInfo && !isAssignedMode) ? `${baseInfo.count.toLocaleString()} registros cargados` : "Arrastra o haz clic para subir tu Excel"}</p>
+            <small>MT FINAL · SELECCIÓN · LATITUD · LONGITUD</small>
+            <input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={(event) => handleFile(event, "base")} />
+          </label>
+          <label className={forecast && !isAssignedMode ? "file-card loaded" : "file-card"}>
+            <div className="file-card-top"><i><LineChart size={21} /></i>{forecast && !isAssignedMode && <span className="ready-badge"><Check size={13} /> Listo</span>}</div>
+            <strong>Forecast mensual</strong>
+            <p>{busy === "forecast" ? "Cargando forecast…" : (forecast && !isAssignedMode) ? `${Object.keys(forecast).length} MT finales cargados` : "Arrastra o haz clic para subir tu Excel"}</p>
+            <small>MT FINAL en filas · días en columnas</small>
+            <input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={(event) => handleFile(event, "forecast")} />
+          </label>
+          <button className="calculate" onClick={calculate} disabled={!baseInfo || !forecast || Boolean(busy) || isAssignedMode}>
+            {busy === "calculate" ? <LoaderCircle className="spin" size={18} /> : <UploadCloud size={18} />} {busy === "calculate" ? "Calculando sin bloquear…" : "Calcular planificación"}
+          </button>
+        </section>
+      ) : (
+        <section className="assigned-upload-box">
+          <label className={baseInfo && isAssignedMode ? "file-card assigned-card loaded" : "file-card assigned-card"}>
+            <div className="file-card-top">
+              <i><Database size={22} /></i>
+              {baseInfo && isAssignedMode && <span className="ready-badge"><Check size={13} /> Cargado</span>}
+            </div>
+            <strong>Subir base asignada previamente (Excel)</strong>
+            <p>{busy === "assigned" ? "Leyendo base asignada…" : (baseInfo && isAssignedMode) ? `${baseInfo.name} — ${points.length.toLocaleString()} puntos cargados` : "Arrastra o haz clic para subir el Excel descargado (BD_PUNTOS_ASIGNADOS.xlsx)"}</p>
+            <small>Carga directa con días ya asignados · Sin recalcular ni agrupar · Habilita filtros, mapa y selector múltiple</small>
+            <input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={handleAssignedFile} />
+          </label>
+        </section>
+      )}
+    </div>
     {progress && <p className="processing-message"><LoaderCircle className="spin" size={16} /> {progress}</p>}
     {error && <p className="message error">{error}</p>}
     {!!points.length && <div className="results animate-fade-up">
-      <div className="results-heading"><div><span className="section-kicker"><Sparkles size={14} /> PLANIFICACIÓN + QA VIAL AUTOMÁTICO</span><h2>Resumen de la operación</h2><p>{filtered.length.toLocaleString()} puntos visibles de {points.length.toLocaleString()} procesados</p></div><div className="result-actions"><button className="qa-road" onClick={runRoadQA} disabled={Boolean(busy) || mt === "all"} title={mt === "all" ? "Selecciona un MT FINAL para repetir el QA vial" : `Repetir la optimización vial de ${mt}`}>{busy === "qa" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />} {busy === "qa" ? "Consultando carreteras…" : "Repetir QA vial"}</button><button className="download" onClick={download} disabled={Boolean(busy)}>{busy === "download" ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} {busy === "download" ? "Preparando…" : "Descargar Excel"}</button></div></div>
+      <div className="results-heading"><div><span className="section-kicker"><Sparkles size={14} /> {isAssignedMode ? "BASE ASIGNADA CARGADA" : "PLANIFICACIÓN + QA VIAL AUTOMÁTICO"}</span><h2>{isAssignedMode ? "Visualización y ajuste de operación" : "Resumen de la operación"}</h2><p>{filtered.length.toLocaleString()} puntos visibles de {points.length.toLocaleString()} procesados</p></div><div className="result-actions"><button className="qa-road" onClick={runRoadQA} disabled={Boolean(busy) || mt === "all"} title={mt === "all" ? "Selecciona un MT FINAL para repetir el QA vial" : `Repetir la optimización vial de ${mt}`}>{busy === "qa" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />} {busy === "qa" ? "Consultando carreteras…" : "Repetir QA vial"}</button><button className="download" onClick={download} disabled={Boolean(busy)}>{busy === "download" ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} {busy === "download" ? "Preparando…" : "Descargar Excel"}</button></div></div>
       <section className="metrics"><article><i><Route size={20} /></i><div><span>Puntos asignados</span><strong>{summary.assigned}</strong><small>{summary.tit} titulares · {summary.sup} suplentes</small></div></article><article><i><CircleGauge size={20} /></i><div><span>Promedio titulares</span><strong>{Math.round(summary.tAvg).toLocaleString()} m</strong><small>entre titulares del mismo día</small></div></article><article className="accent"><i><MapPinned size={20} /></i><div>{planningMode === "titles-only" ? <><span>Modo solo titulares</span><strong>Forecast exacto</strong><small>cuota estricta por MT y día</small></> : <><span>Promedio suplentes</span><strong>{Math.round(summary.sAvg).toLocaleString()} m</strong><small>al titular más cercano</small></>}</div></article></section>
       <div className="map-layout">
         <aside className="map-sidebar" ref={filtersRef}>
