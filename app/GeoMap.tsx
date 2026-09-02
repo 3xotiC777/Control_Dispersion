@@ -57,9 +57,31 @@ function BoxSelection({ enabled, points, onSelect }: { enabled: boolean; points:
   return bounds ? <Rectangle bounds={bounds} pathOptions={{ color: "#7148e8", weight: 2, fillColor: "#7148e8", fillOpacity: 0.12, dashArray: "6 5" }} /> : null;
 }
 
-export default function GeoMap({ points, colors, planningVersion, onSelect, multiSelect, selectedIds, onMultiSelect }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void; multiSelect: boolean; selectedIds: ReadonlySet<string>; onMultiSelect: (points: Point[]) => void }) {
+function AutoCenterMap({ points, filterKey }: { points: Point[]; filterKey?: string }) {
+  const map = useMap();
+  const prevFilterKey = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!points.length || !filterKey) return;
+    if (prevFilterKey.current !== filterKey) {
+      prevFilterKey.current = filterKey;
+      if (points.length === 1) {
+        map.setView([points[0].lat, points[0].lng], 14, { animate: true });
+      } else {
+        const bounds = latLngBounds(points.map((p) => [p.lat, p.lng]));
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15, animate: true });
+        }
+      }
+    }
+  }, [map, filterKey, points]);
+
+  return null;
+}
+
+export default function GeoMap({ points, colors, planningVersion, onSelect, multiSelect, selectedIds, onMultiSelect, filterKey }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void; multiSelect: boolean; selectedIds: ReadonlySet<string>; onMultiSelect: (points: Point[]) => void; filterKey?: string }) {
   const center: LatLngExpression = points.length ? [points.reduce((s,p)=>s+p.lat,0)/points.length, points.reduce((s,p)=>s+p.lng,0)/points.length] : [18.7357, -70.1627];
-  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" /><BoxSelection enabled={multiSelect} points={points} onSelect={onMultiSelect} />{points.map((point) => {
+  return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" /><BoxSelection enabled={multiSelect} points={points} onSelect={onMultiSelect} /><AutoCenterMap points={points} filterKey={filterKey} />{points.map((point) => {
     const color = colors[(point.day! - 1) % colors.length];
     return <Marker key={point.id} position={[point.lat, point.lng]} icon={labeledIcon(point.kind === "Titular" ? "T" : "S", color, selectedIds.has(point.id))} eventHandlers={{ click: () => { if (!multiSelect) onSelect(point); } }}>{!multiSelect && <PointPopup point={point} onSelect={onSelect} />}</Marker>;
   })}</MapContainer></div>;
