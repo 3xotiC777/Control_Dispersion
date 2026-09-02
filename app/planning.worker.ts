@@ -113,32 +113,72 @@ async function handleRequest(request: WorkerRequest) {
   if (request.type === "download") {
     if (!baseBuffer || !currentPoints.length) throw new Error("No hay una planificación para descargar.");
     progress("Preparando el Excel en segundo plano…");
-    const workbook = XLSX.read(baseBuffer, { type: "array", dense: true, cellStyles: true, cellFormula: true, cellHTML: false, cellNF: true });
-    type DenseCell = { t?: string; v?: unknown; [property: string]: unknown };
-    const sheet = workbook.Sheets[workbook.SheetNames[0]] as unknown as Array<Array<DenseCell | undefined>> & { "!ref"?: string };
-    const mtColumnIndex = headers.findIndex((header) => key(header) === "MTFINAL");
-    let dayColumnIndex = headers.findIndex((header) => key(header) === "DIA");
-    if (dayColumnIndex < 0) {
-      dayColumnIndex = headers.findIndex((header) => ["DIAS", "DAY", "DIAASIGNADO", "JORNADA"].includes(key(header)));
+    let workbook: XLSX.WorkBook;
+    try {
+      workbook = XLSX.read(baseBuffer, { type: "array", dense: true, cellStyles: true, cellFormula: true, cellHTML: false, cellNF: true });
+    } catch {
+      workbook = XLSX.read(baseBuffer, { type: "array", dense: true, cellStyles: false, cellFormula: false, cellHTML: false, cellNF: false });
     }
-    if (dayColumnIndex < 0) dayColumnIndex = headers.length;
-    let averageColumnIndex = headers.findIndex((header) => ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"].includes(key(header)));
-    if (averageColumnIndex < 0) averageColumnIndex = dayColumnIndex === headers.length ? dayColumnIndex + 1 : headers.length;
-    sheet[0] ??= [];
-    sheet[0][dayColumnIndex] = { t: "s", v: "DIA" };
-    sheet[0][averageColumnIndex] = { t: "s", v: "Promedio metros" };
+    const sheetName = workbook.SheetNames[0];
+    const sheetObj = (workbook.Sheets[sheetName] ?? {}) as Record<string, any>;
+    const range = XLSX.utils.decode_range(sheetObj["!ref"] ?? `A1:Z${baseCount + 1}`);
+
+    const getCell = (r: number, c: number) => {
+      if (Array.isArray(sheetObj["!data"])) return sheetObj["!data"]?.[r]?.[c];
+      if (Array.isArray(sheetObj)) return sheetObj[r]?.[c];
+      return sheetObj[XLSX.utils.encode_cell({ r, c })];
+    };
+
+    const writeCell = (r: number, c: number, cell: { t: string; v: unknown }) => {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      sheetObj[addr] = cell;
+      if (Array.isArray(sheetObj["!data"])) {
+        sheetObj["!data"][r] ??= [];
+        sheetObj["!data"][r][c] = cell;
+      }
+      if (Array.isArray(sheetObj)) {
+        sheetObj[r] ??= [];
+        sheetObj[r][c] = cell;
+      }
+    };
+
+    const headers: string[] = [];
+    for (let c = 0; c <= Math.max(range.e.c, 50); c++) {
+      const val = getCell(0, c)?.v;
+      headers[c] = val !== undefined && val !== null ? String(val).trim() : "";
+    }
+
+    const mtColumnIndex = headers.findIndex((h) => key(h) === "MTFINAL");
+    let dayColumnIndex = headers.findIndex((h) => key(h) === "DIA");
+    if (dayColumnIndex < 0) {
+      dayColumnIndex = headers.findIndex((h) => ["DIAS", "DAY", "DIAASIGNADO", "JORNADA"].includes(key(h)));
+    }
+    if (dayColumnIndex < 0) dayColumnIndex = range.e.c + 1;
+
+    let averageColumnIndex = headers.findIndex((h) => ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"].includes(key(h)));
+    if (averageColumnIndex < 0) {
+      averageColumnIndex = dayColumnIndex > range.e.c ? dayColumnIndex + 1 : range.e.c + 1;
+    }
+
+    writeCell(0, dayColumnIndex, { t: "s", v: "DIA" });
+    writeCell(0, averageColumnIndex, { t: "s", v: "Promedio metros" });
+
     const assignmentByRow = new Map(currentPoints.map((point) => [point.sourceIndex, point]));
     for (let sourceIndex = 0; sourceIndex < baseCount; sourceIndex++) {
       const point = assignmentByRow.get(sourceIndex);
       const rowIndex = sourceIndex + 1;
-      const row = sheet[rowIndex] ?? (sheet[rowIndex] = []);
-      if (point?.assignedMt && mtColumnIndex >= 0) row[mtColumnIndex] = { ...(row[mtColumnIndex] ?? {}), t: "s", v: point.assignedMt };
-      row[dayColumnIndex] = point?.day == null ? { t: "s", v: "" } : { t: "n", v: point.day };
-      row[averageColumnIndex] = point?.avgMeters == null ? { t: "s", v: "" } : { t: "n", v: Math.round(point.avgMeters) };
+      if (point?.assignedMt && mtColumnIndex >= 0) {
+        const prev = getCell(rowIndex, mtColumnIndex);
+        writeCell(rowIndex, mtColumnIndex, { ...(prev ?? {}), t: "s", v: point.assignedMt });
+      }
+      writeCell(rowIndex, dayColumnIndex, point?.day == null ? { t: "s", v: "" } : { t: "n", v: point.day });
+      writeCell(rowIndex, averageColumnIndex, point?.avgMeters == null ? { t: "s", v: "" } : { t: "n", v: Math.round(point.avgMeters) });
     }
-    const range = XLSX.utils.decode_range(sheet["!ref"] ?? `A1:A${baseCount + 1}`);
+
     range.e.c = Math.max(range.e.c, dayColumnIndex, averageColumnIndex);
-    sheet["!ref"] = XLSX.utils.encode_range(range);
+    range.e.r = Math.max(range.e.r, baseCount);
+    sheetObj["!ref"] = XLSX.utils.encode_range(range);
+
     const buffer = XLSX.write(workbook, { type: "array", bookType: "xlsx", compression: true }) as ArrayBuffer;
     return { buffer };
   }
