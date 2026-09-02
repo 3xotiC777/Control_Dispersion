@@ -124,7 +124,10 @@ export default function OptimizedPage() {
       if (type === "base") setBaseInfo(null); else setForecast(null);
       setPoints([]); setPlanningMode(null); setNotices([]); setIsAssignedMode(false);
       setError(exception instanceof Error ? exception.message : "No se pudo leer el archivo.");
-    } finally { setBusy(null); setProgress(""); }
+    } finally {
+      setBusy(null); setProgress("");
+      if (event.target) event.target.value = "";
+    }
   };
 
   const handleAssignedFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -144,7 +147,10 @@ export default function OptimizedPage() {
     } catch (exception) {
       setBaseInfo(null); setForecast(null); setPoints([]); setPlanningMode(null); setNotices([]); setIsAssignedMode(false);
       setError(exception instanceof Error ? exception.message : "No se pudo leer la base asignada.");
-    } finally { setBusy(null); setProgress(""); }
+    } finally {
+      setBusy(null); setProgress("");
+      if (event.target) event.target.value = "";
+    }
   };
 
   const calculate = async () => {
@@ -158,15 +164,23 @@ export default function OptimizedPage() {
     finally { setBusy(null); setProgress(""); }
   };
 
-  const mts = useMemo(() => Object.keys(forecast ?? {}).sort(), [forecast]);
+  const mts = useMemo(() => {
+    const fromForecast = Object.keys(forecast ?? {});
+    if (fromForecast.length) return fromForecast.sort();
+    return [...new Set(points.map(operationalMt).filter(Boolean))].sort();
+  }, [forecast, points]);
   const selectionOptions = useMemo(() => {
     const order = ["T", "T PANEL", "S PANEL", "S1", "S2", "S3", "S4", "S ON", "S ORO"];
     return [...new Set(points.map((point) => point.selection))].sort((a, b) => (order.indexOf(a) < 0 ? 99 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 99 : order.indexOf(b)) || a.localeCompare(b));
   }, [points]);
   const availableDays = useMemo(() => {
-    if (mt !== "all") return Object.keys(forecast?.[mt] ?? {}).map(Number).sort((a, b) => a - b);
-    return [...new Set(Object.values(forecast ?? {}).flatMap((daily) => Object.keys(daily).map(Number)))].sort((a, b) => a - b);
-  }, [forecast, mt]);
+    const fromForecast = (mt !== "all"
+      ? Object.keys(forecast?.[mt] ?? {})
+      : Object.values(forecast ?? {}).flatMap((daily) => Object.keys(daily))
+    ).map(Number).filter((d) => Number.isInteger(d) && d > 0);
+    if (fromForecast.length) return [...new Set(fromForecast)].sort((a, b) => a - b);
+    return [...new Set(points.map((p) => p.day).filter((d): d is number => d !== null && d > 0))].sort((a, b) => a - b);
+  }, [forecast, mt, points]);
   const selectedDaySet = useMemo(() => new Set(selectedDays), [selectedDays]);
   const filtered = useMemo(() => points.filter((point) =>
     (mt === "all" || operationalMt(point) === mt) &&
@@ -199,27 +213,52 @@ export default function OptimizedPage() {
     return stats;
   }, [filtered]);
 
-  const tableRows = useMemo(() => Object.entries(forecast ?? {}).filter(([currentMt]) => mt === "all" || currentMt === mt).flatMap(([currentMt, daily]) =>
-    Object.keys(daily).map(Number).filter((day) => !selectedDaySet.size || selectedDaySet.has(day)).map((day) => {
-      const stat = tableStats.get(`${currentMt}\u0000${day}`) ?? { tit: 0, sup: 0, titleDistance: 0, spareDistance: 0 };
-      return { mt: currentMt, day, ...stat, titleAverage: stat.tit ? Math.round(stat.titleDistance / stat.tit) : 0, spareAverage: stat.sup ? Math.round(stat.spareDistance / stat.sup) : 0 };
-    })
-  ), [forecast, mt, selectedDaySet, tableStats]);
+  const tableRows = useMemo(() => {
+    const effectiveMts = mt === "all" ? mts : [mt];
+    return effectiveMts.flatMap((currentMt) => {
+      const daysForMt = (forecast?.[currentMt] && Object.keys(forecast[currentMt]).length
+        ? Object.keys(forecast[currentMt]).map(Number)
+        : [...new Set(points.filter((p) => operationalMt(p) === currentMt && p.day).map((p) => p.day!))]
+      ).filter((day) => !selectedDaySet.size || selectedDaySet.has(day)).sort((a, b) => a - b);
 
-  const mapCandidates = useMemo(() => filtered.filter((point) => point.day), [filtered]);
+      return daysForMt.map((day) => {
+        const stat = tableStats.get(`${currentMt}\u0000${day}`) ?? { tit: 0, sup: 0, titleDistance: 0, spareDistance: 0 };
+        return {
+          mt: currentMt,
+          day,
+          ...stat,
+          titleAverage: stat.tit ? Math.round(stat.titleDistance / stat.tit) : 0,
+          spareAverage: stat.sup ? Math.round(stat.spareDistance / stat.sup) : 0,
+        };
+      });
+    });
+  }, [forecast, mt, mts, points, selectedDaySet, tableStats]);
+
+  const mapCandidates = useMemo(() => {
+    const withDay = filtered.filter((point) => point.day !== null && point.day !== undefined);
+    return withDay.length ? withDay : filtered;
+  }, [filtered]);
   const mapLimit = mt === "all" ? 1200 : 3000;
   const mapPoints = useMemo(() => sampledMapPoints(mapCandidates, mapLimit), [mapCandidates, mapLimit]);
   const mapLimited = mapCandidates.length > mapPoints.length;
   const bulkPoints = useMemo(() => points.filter((point) => selectedIds.has(point.id)), [points, selectedIds]);
   const bulkDays = useMemo(() => {
     if (!bulkPoints.length) return [];
-    const common = new Set(Object.keys(forecast?.[operationalMt(bulkPoints[0])] ?? {}).map(Number));
+    const common = new Set(
+      forecast?.[operationalMt(bulkPoints[0])] && Object.keys(forecast[operationalMt(bulkPoints[0])]).length
+        ? Object.keys(forecast[operationalMt(bulkPoints[0])]).map(Number)
+        : availableDays
+    );
     bulkPoints.slice(1).forEach((point) => {
-      const available = new Set(Object.keys(forecast?.[operationalMt(point)] ?? {}).map(Number));
+      const available = new Set(
+        forecast?.[operationalMt(point)] && Object.keys(forecast[operationalMt(point)]).length
+          ? Object.keys(forecast[operationalMt(point)]).map(Number)
+          : availableDays
+      );
       [...common].forEach((day) => { if (!available.has(day)) common.delete(day); });
     });
     return [...common].sort((a, b) => a - b);
-  }, [bulkPoints, forecast]);
+  }, [bulkPoints, forecast, availableDays]);
   const bulkSummary = useMemo(() => ({
     titles: bulkPoints.filter((point) => point.kind === "Titular").length,
     spares: bulkPoints.filter((point) => point.kind === "Suplente").length,

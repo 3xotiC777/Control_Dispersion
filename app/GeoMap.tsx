@@ -82,9 +82,10 @@ function AutoCenterMap({ points, filterKey }: { points: Point[]; filterKey?: str
 export default function GeoMap({ points, colors, planningVersion, onSelect, multiSelect, selectedIds, onMultiSelect, filterKey, viewMode = "day", mtColors }: { points: Point[]; colors: string[]; planningVersion: number; onSelect: (p: Point) => void; multiSelect: boolean; selectedIds: ReadonlySet<string>; onMultiSelect: (points: Point[]) => void; filterKey?: string; viewMode?: "day" | "mt"; mtColors?: Map<string, string> }) {
   const center: LatLngExpression = points.length ? [points.reduce((s,p)=>s+p.lat,0)/points.length, points.reduce((s,p)=>s+p.lng,0)/points.length] : [18.7357, -70.1627];
   return <div className="map-wrap"><MapContainer key={planningVersion} center={center} zoom={points.length === 1 ? 13 : 8} scrollWheelZoom className="leaflet-map"><TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" /><BoxSelection enabled={multiSelect} points={points} onSelect={onMultiSelect} /><AutoCenterMap points={points} filterKey={filterKey} />{points.map((point) => {
+    const dayColor = point.day && point.day > 0 ? colors[(point.day - 1) % colors.length] : "#7148e8";
     const color = viewMode === "mt" && mtColors
-      ? (mtColors.get(operationalMt(point)) ?? colors[0])
-      : colors[(point.day! - 1) % colors.length];
+      ? (mtColors.get(operationalMt(point)) ?? dayColor)
+      : dayColor;
     return <Marker key={point.id} position={[point.lat, point.lng]} icon={labeledIcon(point.kind === "Titular" ? "T" : "S", color, selectedIds.has(point.id))} eventHandlers={{ click: () => { if (!multiSelect) onSelect(point); } }}>{!multiSelect && <PointPopup point={point} onSelect={onSelect} />}</Marker>;
   })}</MapContainer></div>;
 }

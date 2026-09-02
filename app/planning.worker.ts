@@ -35,7 +35,6 @@ async function handleRequest(request: WorkerRequest) {
     progress("Leyendo la base asignada en segundo plano…");
     const buffer = payload.buffer as ArrayBuffer;
     const rows = parseWorkbook(buffer);
-    baseColumns(rows);
     baseBuffer = buffer;
     baseCount = rows.length;
     const extracted = extractAssignedPoints(rows);

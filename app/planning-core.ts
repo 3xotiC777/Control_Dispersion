@@ -22,12 +22,33 @@ export type PlanningMode = "with-spares" | "titles-only";
 
 export const MAX_SUPPLEMENT_DISTANCE_METERS = 15000;
 export const DAY_FORECAST_TOLERANCE = 2;
-export const norm = (value: unknown) => String(value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+export const norm = (value: unknown) =>
+  String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
 export const key = (value: unknown) => norm(value).replace(/[^A-Z0-9]/g, "");
 export const asNumber = (value: unknown) => {
   const parsed = typeof value === "number" ? value : Number(String(value ?? "").trim().replace(",", "."));
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+export function parseDayNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.round(value);
+  const str = String(value).trim();
+  if (!str) return null;
+  const directNum = Number(str.replace(",", "."));
+  if (Number.isFinite(directNum) && directNum > 0) return Math.round(directNum);
+  const match = str.match(/\d+/);
+  if (match) {
+    const num = Number(match[0]);
+    if (Number.isFinite(num) && num > 0) return Math.round(num);
+  }
+  return null;
+}
 
 const rad = (value: number) => (value * Math.PI) / 180;
 export const meters = (a: Pick<Point, "lat" | "lng">, b: Pick<Point, "lat" | "lng">) => {
@@ -39,18 +60,20 @@ export const meters = (a: Pick<Point, "lat" | "lng">, b: Pick<Point, "lat" | "ln
 
 export const column = (rows: Raw[], names: string[]) => {
   const headers = Object.keys(rows[0] ?? {});
-  return headers.find((header) => names.includes(key(header)));
+  const cleanNames = names.map(key);
+  return headers.find((header) => cleanNames.includes(key(header)));
 };
 
 export function baseColumns(rows: Raw[]) {
   if (!rows.length) throw new Error("La base de puntos no contiene registros.");
+  const headers = Object.keys(rows[0] ?? {});
   const columns = {
-    mt: column(rows, ["MTFINAL"]),
-    selection: column(rows, ["SELECCION", "SELECCIONPUNTO"]),
-    latitude: column(rows, ["LATITUDE", "LATITUD", "LAT"]),
-    longitude: column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG"]),
-    pdv: column(rows, ["PDV"]),
-    refId: column(rows, ["REFID"]),
+    mt: column(rows, ["MTFINAL", "MT", "TERRITORIO", "ZONA", "RUTA"]) ?? headers.find((h) => key(h).includes("MT") || key(h).includes("TERRITORIO")),
+    selection: column(rows, ["SELECCION", "SELECCIONPUNTO", "TIPO", "TIPOPUNTO", "KIND", "CLASE", "CATEGORIA"]) ?? headers.find((h) => key(h).includes("SELECC") || key(h).includes("TIPO")),
+    latitude: column(rows, ["LATITUDE", "LATITUD", "LAT", "Y"]) ?? headers.find((h) => key(h).startsWith("LAT")),
+    longitude: column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG", "X"]) ?? headers.find((h) => key(h).startsWith("LON") || key(h).startsWith("LNG")),
+    pdv: column(rows, ["PDV", "NOMBRE", "CLIENTE", "PUNTO", "NAME", "DESCRIPCION", "ESTABLECIMIENTO"]) ?? headers.find((h) => key(h).includes("PDV") || key(h).includes("NOMBRE") || key(h).includes("CLIENTE")),
+    refId: column(rows, ["REFID", "ID", "CODIGO", "COD", "REF", "PUNTOID"]) ?? headers.find((h) => key(h).includes("REF") || key(h).includes("ID") || key(h).includes("COD")),
   };
   const labels: Record<keyof typeof columns, string> = { mt: "MT FINAL", selection: "SELECCION", latitude: "LATITUD", longitude: "LONGITUD", pdv: "PDV", refId: "RefID" };
   const missing = (Object.keys(columns) as Array<keyof typeof columns>).find((name) => !columns[name]);
@@ -134,15 +157,37 @@ export function extractPoints(rows: Raw[]): Point[] {
 }
 
 export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast: Forecast; mode: PlanningMode } {
-  const fields = baseColumns(rows);
-  const dayColumn = column(rows, ["DIA", "DIAS", "DAY", "DIAASIGNADO", "JORNADA", "DIASIGNADO"]);
-  if (!dayColumn) throw new Error('No se encontró la columna de día ("DIA" o "DÍA") en la base asignada.');
-  const avgColumn = column(rows, ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"]);
-  const assignedMtColumn = column(rows, ["MTASIGNADO", "ASSIGNEDMT"]);
-  const countryColumn = column(rows, ["PAIS", "COUNTRY"]);
+  if (!rows.length) throw new Error("La base no contiene registros.");
+  const headers = Object.keys(rows[0] ?? {});
+
+  const latCol = column(rows, ["LATITUDE", "LATITUD", "LAT", "Y"]) ?? headers.find((h) => key(h).startsWith("LAT"));
+  const lngCol = column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG", "X"]) ?? headers.find((h) => key(h).startsWith("LON") || key(h).startsWith("LNG"));
+  if (!latCol || !lngCol) {
+    throw new Error('No se encontraron las columnas de coordenadas ("LATITUD" y "LONGITUD") en el archivo.');
+  }
+
+  const dayCol = column(rows, [
+    "DIA", "DIAS", "DAY", "DAYS", "DIAASIGNADO", "DIAFINAL", "JORNADA", "JORNADAS",
+    "NUMDIA", "NUMERODIA", "NRODIA", "NUMERODEDIA"
+  ]) ?? headers.find((h) => {
+    const k = key(h);
+    return k.includes("DIA") || k.includes("DAY") || k.includes("JORNADA");
+  });
+  if (!dayCol) {
+    throw new Error('No se encontró la columna de día ("DIA", "DÍA" o "JORNADA") en la base asignada.');
+  }
+
+  const mtCol = column(rows, ["MTFINAL", "MT", "TERRITORIO", "ZONA", "RUTA"]) ?? headers.find((h) => key(h).includes("MT") || key(h).includes("TERRITORIO"));
+  const selCol = column(rows, ["SELECCION", "SELECCIONPUNTO", "TIPO", "TIPOPUNTO", "KIND", "CLASE", "CATEGORIA"]) ?? headers.find((h) => key(h).includes("SELECC") || key(h).includes("TIPO"));
+  const pdvCol = column(rows, ["PDV", "NOMBRE", "CLIENTE", "PUNTO", "NAME", "DESCRIPCION", "ESTABLECIMIENTO"]) ?? headers.find((h) => key(h).includes("PDV") || key(h).includes("NOMBRE") || key(h).includes("CLIENTE"));
+  const refIdCol = column(rows, ["REFID", "ID", "CODIGO", "COD", "REF", "PUNTOID"]) ?? headers.find((h) => key(h).includes("REF") || key(h).includes("ID") || key(h).includes("COD"));
+  const avgCol = column(rows, ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS", "DISTANCIA"]) ?? headers.find((h) => key(h).includes("PROMEDIO") || key(h).includes("METROS"));
+  const assignedMtCol = column(rows, ["MTASIGNADO", "ASSIGNEDMT"]);
+  const countryCol = column(rows, ["PAIS", "COUNTRY"]);
+
   let validCoordinates = 0, swappedCoordinates = 0;
   const coordinates = rows.map((row) => {
-    const lat = asNumber(row[fields.latitude]), lng = asNumber(row[fields.longitude]);
+    const lat = asNumber(row[latCol]), lng = asNumber(row[lngCol]);
     if (lat !== null && lng !== null) {
       validCoordinates++;
       if (Math.abs(lat) > 60 && Math.abs(lng) < 60) swappedCoordinates++;
@@ -150,27 +195,33 @@ export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast:
     return { lat, lng };
   });
   const likelySwapped = validCoordinates > 0 && swappedCoordinates > validCoordinates * 0.55;
+
   const points: Point[] = [];
   rows.forEach((row, sourceIndex) => {
     const { lat, lng } = coordinates[sourceIndex];
     if (lat === null || lng === null) return;
-    const selection = norm(row[fields.selection]);
-    const kind: Point["kind"] = selection === "T" || selection === "T PANEL" ? "Titular" : selection.startsWith("S") ? "Suplente" : "Otro";
-    if (kind === "Otro") return;
-    const refId = String(row[fields.refId] ?? sourceIndex + 1);
-    const dayVal = dayColumn ? asNumber(row[dayColumn]) : null;
-    const day = dayVal !== null && dayVal > 0 ? Math.round(dayVal) : null;
-    const avgVal = avgColumn ? asNumber(row[avgColumn]) : null;
-    const assignedMt = assignedMtColumn ? (String(row[assignedMtColumn] ?? "").trim() || null) : null;
+
+    const rawSel = selCol ? norm(row[selCol]) : "T";
+    const selection = rawSel || "T";
+    const isSpare = selection.startsWith("S") || selection.includes("SUPLENTE") || selection.includes("SPARE");
+    const kind: Point["kind"] = isSpare ? "Suplente" : "Titular";
+
+    const refId = refIdCol ? String(row[refIdCol] ?? sourceIndex + 1) : String(sourceIndex + 1);
+    const name = pdvCol ? String(row[pdvCol] ?? refId) : refId;
+    const mt = mtCol ? String(row[mtCol] ?? "").trim() || "MT 1" : "MT 1";
+    const assignedMt = assignedMtCol ? (String(row[assignedMtCol] ?? "").trim() || null) : null;
+    const day = parseDayNumber(row[dayCol]);
+    const avgVal = avgCol ? asNumber(row[avgCol]) : null;
+
     points.push({
       id: `${refId}-${sourceIndex}`,
       sourceIndex,
       refId,
-      name: String(row[fields.pdv] ?? refId),
-      mt: String(row[fields.mt] ?? "").trim(),
+      name,
+      mt,
       selection,
       kind,
-      priorityRank: selectionPriority(selection, norm(countryColumn ? row[countryColumn] : "")),
+      priorityRank: selectionPriority(selection, norm(countryCol ? row[countryCol] : "")),
       lat: likelySwapped ? lng : lat,
       lng: likelySwapped ? lat : lng,
       day,
@@ -178,8 +229,12 @@ export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast:
       avgMeters: avgVal,
     });
   });
+
   refreshAverages(points);
-  const mode: PlanningMode = rows.some((row) => norm(row[fields.selection]).startsWith("S")) ? "with-spares" : "titles-only";
+
+  const hasSpares = points.some((p) => p.kind === "Suplente");
+  const mode: PlanningMode = hasSpares ? "with-spares" : "titles-only";
+
   const derivedForecast: Forecast = {};
   points.forEach((point) => {
     const opMt = operationalMt(point);
@@ -191,10 +246,13 @@ export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast:
   });
   points.forEach((point) => {
     const opMt = operationalMt(point);
-    if (!opMt || !point.day) return;
+    if (!opMt) return;
     derivedForecast[opMt] ??= {};
-    derivedForecast[opMt][point.day] ??= 0;
+    if (point.day) {
+      derivedForecast[opMt][point.day] ??= 0;
+    }
   });
+
   return { points, forecast: derivedForecast, mode };
 }
 
