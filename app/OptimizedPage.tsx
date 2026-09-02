@@ -6,8 +6,42 @@ import { CalendarDays, Check, ChevronDown, CircleGauge, Database, Download, Laye
 import { operationalMt, type Forecast, type Notice, type PlanningMode, type Point } from "./planning-core";
 
 const GeoMap = dynamic(() => import("./GeoMap"), { ssr: false });
-const COLORS = ["#0b7285", "#7c3aed", "#e8590c", "#2f9e44", "#c2255c", "#1971c2", "#a61e4d", "#5f3dc4", "#087f5b", "#9c36b5"];
-const MT_PALETTE = ["#e8590c", "#7c3aed", "#0b7285", "#2f9e44", "#c2255c", "#1971c2", "#d6336c", "#5f3dc4", "#087f5b", "#f59f00", "#364fc7", "#9c36b5", "#099268", "#e03131", "#1098ad", "#2b8a3e", "#e67700", "#4c6ef5", "#ae3ec9", "#f76707", "#15aabf", "#40c057", "#fa5252", "#7950f2", "#fab005"];
+
+function hslToHex(h: number, s: number, l: number) {
+  l /= 100;
+  const a = (s * Math.min(l, 1 - l)) / 100;
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+const GOLDEN_ANGLE = 137.507764;
+
+export function getMtColor(index: number): string {
+  const h = Math.round((index * GOLDEN_ANGLE) % 360);
+  let l = 44 + (index % 3) * 5;
+  let s = 88 + (index % 2) * 8;
+  if (h >= 40 && h <= 70) {
+    l = 44 + (index % 2) * 5;
+    s = 96;
+  } else if (h >= 71 && h <= 160) {
+    l = 38 + (index % 3) * 6;
+  }
+  return hslToHex(h, s, l);
+}
+
+// 32 distinct, high-contrast colors for Day 1..31
+const COLORS = [
+  "#1099c6", "#ef066f", "#2f9e44", "#5f3dc4", "#e8590c", "#087f5b",
+  "#d6336c", "#1971c2", "#e5a50a", "#7c3aed", "#12b886", "#c2255c",
+  "#20c997", "#364fc7", "#f76707", "#0ca678", "#9c36b5", "#4c6ef5",
+  "#d9480f", "#2b8a3e", "#ae3ec9", "#15aabf", "#e03131", "#66a80f",
+  "#845ef7", "#099268", "#f03e3e", "#5c7cfa", "#f59f00", "#1098ad",
+  "#a61e4d", "#7048e8"
+];
 
 type Busy = "base" | "forecast" | "assigned" | "calculate" | "download" | "qa" | "move" | "bulk-move" | null;
 type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void };
@@ -291,7 +325,7 @@ export default function OptimizedPage() {
   const mtColorMap = useMemo(() => {
     const map = new Map<string, string>();
     mts.forEach((name, index) => {
-      map.set(name, MT_PALETTE[index % MT_PALETTE.length]);
+      map.set(name, getMtColor(index));
     });
     return map;
   }, [mts]);
