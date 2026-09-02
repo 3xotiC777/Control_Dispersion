@@ -143,7 +143,7 @@ export default function OptimizedPage() {
       setPlanningMode(result.mode);
       setIsAssignedMode(true);
       setNotices([{ type: "info", text: `Base cargada: ${result.points.length.toLocaleString()} puntos disponibles (${result.assignedCount.toLocaleString()} con día asignado). Sin recálculos aplicados.` }]);
-      setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setMt("all"); setSelectedDays([]); setPlanningVersion((version) => version + 1);
+      setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setMt("all"); setSelectedDays([]); setViewMode("day"); setPlanningVersion((version) => version + 1);
     } catch (exception) {
       setBaseInfo(null); setForecast(null); setPoints([]); setPlanningMode(null); setNotices([]); setIsAssignedMode(false);
       setError(exception instanceof Error ? exception.message : "No se pudo leer la base asignada.");
@@ -174,12 +174,20 @@ export default function OptimizedPage() {
     return [...new Set(points.map((point) => point.selection))].sort((a, b) => (order.indexOf(a) < 0 ? 99 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 99 : order.indexOf(b)) || a.localeCompare(b));
   }, [points]);
   const availableDays = useMemo(() => {
-    const fromForecast = (mt !== "all"
-      ? Object.keys(forecast?.[mt] ?? {})
-      : Object.values(forecast ?? {}).flatMap((daily) => Object.keys(daily))
-    ).map(Number).filter((d) => Number.isInteger(d) && d > 0);
-    if (fromForecast.length) return [...new Set(fromForecast)].sort((a, b) => a - b);
-    return [...new Set(points.map((p) => p.day).filter((d): d is number => d !== null && d > 0))].sort((a, b) => a - b);
+    const daysSet = new Set<number>();
+    if (mt !== "all") {
+      Object.keys(forecast?.[mt] ?? {}).forEach((d) => { const n = Number(d); if (n > 0) daysSet.add(n); });
+    } else {
+      Object.values(forecast ?? {}).forEach((daily) => {
+        Object.keys(daily).forEach((d) => { const n = Number(d); if (n > 0) daysSet.add(n); });
+      });
+    }
+    points.forEach((p) => {
+      if ((mt === "all" || operationalMt(p) === mt) && p.day !== null && p.day !== undefined && p.day > 0) {
+        daysSet.add(p.day);
+      }
+    });
+    return [...daysSet].sort((a, b) => a - b);
   }, [forecast, mt, points]);
   const selectedDaySet = useMemo(() => new Set(selectedDays), [selectedDays]);
   const filtered = useMemo(() => points.filter((point) =>

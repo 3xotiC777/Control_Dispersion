@@ -116,9 +116,11 @@ async function handleRequest(request: WorkerRequest) {
     const workbook = XLSX.read(baseBuffer, { type: "array", dense: true, cellStyles: true, cellFormula: true, cellHTML: false, cellNF: true });
     type DenseCell = { t?: string; v?: unknown; [property: string]: unknown };
     const sheet = workbook.Sheets[workbook.SheetNames[0]] as unknown as Array<Array<DenseCell | undefined>> & { "!ref"?: string };
-    const headers = (sheet[0] ?? []).map((cell) => cell?.v);
     const mtColumnIndex = headers.findIndex((header) => key(header) === "MTFINAL");
-    let dayColumnIndex = headers.findIndex((header) => ["DIA", "DIAS", "DAY", "DIAASIGNADO", "JORNADA"].includes(key(header)));
+    let dayColumnIndex = headers.findIndex((header) => key(header) === "DIA");
+    if (dayColumnIndex < 0) {
+      dayColumnIndex = headers.findIndex((header) => ["DIAS", "DAY", "DIAASIGNADO", "JORNADA"].includes(key(header)));
+    }
     if (dayColumnIndex < 0) dayColumnIndex = headers.length;
     let averageColumnIndex = headers.findIndex((header) => ["PROMEDIOMETROS", "PROMEDIO", "AVGMETERS", "PROMETROS"].includes(key(header)));
     if (averageColumnIndex < 0) averageColumnIndex = dayColumnIndex === headers.length ? dayColumnIndex + 1 : headers.length;

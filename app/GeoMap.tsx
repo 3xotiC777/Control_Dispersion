@@ -7,7 +7,7 @@ import styles from "./supplement-markers.module.css";
 import { operationalMt, type Point } from "./planning-core";
 
 function PointPopup({ point, onSelect }: { point: Point; onSelect: (point: Point) => void }) {
-  return <Popup><b>{point.name}</b><br />RefID: {point.refId}<br />{point.assignedMt ?? point.mt}<br />Día {point.day} · {point.kind}<br />{Math.round(point.avgMeters ?? 0).toLocaleString()} m promedio<br /><button onClick={() => onSelect(point)}>Cambiar día</button></Popup>;
+  return <Popup><b>{point.name}</b><br />RefID: {point.refId}<br />{point.assignedMt ?? point.mt}<br />{point.day ? `Día ${point.day}` : "Sin asignar"} · {point.kind}<br />{Math.round(point.avgMeters ?? 0).toLocaleString()} m promedio<br /><button onClick={() => onSelect(point)}>Cambiar día</button></Popup>;
 }
 
 function labeledIcon(label: "T" | "S", color: string, selected: boolean) {

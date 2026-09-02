@@ -37,11 +37,38 @@ export const asNumber = (value: unknown) => {
 
 export function parseDayNumber(value: unknown): number | null {
   if (value == null) return null;
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.round(value);
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return value.getDate();
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    if (value > 30000 && value < 60000) {
+      const date = new Date(Math.round((value - 25569) * 86400 * 1000));
+      if (!isNaN(date.getTime())) return date.getUTCDate();
+    }
+    if (value > 0) return Math.round(value);
+    return null;
+  }
   const str = String(value).trim();
   if (!str) return null;
   const directNum = Number(str.replace(",", "."));
-  if (Number.isFinite(directNum) && directNum > 0) return Math.round(directNum);
+  if (Number.isFinite(directNum)) {
+    if (directNum > 30000 && directNum < 60000) {
+      const date = new Date(Math.round((directNum - 25569) * 86400 * 1000));
+      if (!isNaN(date.getTime())) return date.getUTCDate();
+    }
+    if (directNum > 0) return Math.round(directNum);
+  }
+  const dateMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (dateMatch) {
+    const d = Number(dateMatch[1]);
+    if (d >= 1 && d <= 31) return d;
+  }
+  const isoDateMatch = str.match(/^\d{4}[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (isoDateMatch) {
+    const d = Number(isoDateMatch[2]);
+    if (d >= 1 && d <= 31) return d;
+  }
   const match = str.match(/\d+/);
   if (match) {
     const num = Number(match[0]);
@@ -166,13 +193,40 @@ export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast:
     throw new Error('No se encontraron las columnas de coordenadas ("LATITUD" y "LONGITUD") en el archivo.');
   }
 
-  const dayCol = column(rows, [
-    "DIA", "DIAS", "DAY", "DAYS", "DIAASIGNADO", "DIAFINAL", "JORNADA", "JORNADAS",
-    "NUMDIA", "NUMERODIA", "NRODIA", "NUMERODEDIA"
-  ]) ?? headers.find((h) => {
+  // 1. Search for headers whose clean key is exactly "DIA"
+  const exactDiaHeaders = headers.filter((h) => key(h) === "DIA");
+
+  // 2. Search for headers that start with "DIA" or have day terms
+  const otherDayHeaders = headers.filter((h) => {
     const k = key(h);
-    return k.includes("DIA") || k.includes("DAY") || k.includes("JORNADA");
+    return k !== "DIA" && (
+      k.startsWith("DIA") ||
+      k.includes("JORNADA") ||
+      ["DIAS", "DAY", "DAYS"].includes(k)
+    );
   });
+
+  const candidateHeaders = [...exactDiaHeaders, ...otherDayHeaders];
+
+  // Pick the header that actually contains the most valid day numbers in rows
+  let bestDayCol: string | null = null;
+  let maxValidCount = 0;
+
+  for (const candidate of candidateHeaders) {
+    let validCount = 0;
+    const sampleSize = Math.min(rows.length, 500);
+    for (let i = 0; i < sampleSize; i++) {
+      const val = parseDayNumber(rows[i]?.[candidate]);
+      if (val !== null && val > 0 && val <= 31) validCount++;
+    }
+    if (validCount > maxValidCount) {
+      maxValidCount = validCount;
+      bestDayCol = candidate;
+    }
+  }
+
+  // If no candidate scored valid days, prefer exact "DIA" or any header containing DIA
+  const dayCol = bestDayCol ?? exactDiaHeaders[0] ?? headers.find((h) => key(h).includes("DIA"));
   if (!dayCol) {
     throw new Error('No se encontró la columna de día ("DIA", "DÍA" o "JORNADA") en la base asignada.');
   }
@@ -210,7 +264,18 @@ export function extractAssignedPoints(rows: Raw[]): { points: Point[]; forecast:
     const name = pdvCol ? String(row[pdvCol] ?? refId) : refId;
     const mt = mtCol ? String(row[mtCol] ?? "").trim() || "MT 1" : "MT 1";
     const assignedMt = assignedMtCol ? (String(row[assignedMtCol] ?? "").trim() || null) : null;
-    const day = parseDayNumber(row[dayCol]);
+    let day = dayCol ? parseDayNumber(row[dayCol]) : null;
+    if (day === null) {
+      for (const [k, v] of Object.entries(row)) {
+        if (key(k) === "DIA") {
+          const parsed = parseDayNumber(v);
+          if (parsed !== null && parsed > 0 && parsed <= 31) {
+            day = parsed;
+            break;
+          }
+        }
+      }
+    }
     const avgVal = avgCol ? asNumber(row[avgCol]) : null;
 
     points.push({
