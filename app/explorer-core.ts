@@ -175,6 +175,46 @@ export function geometryBounds(geometry: number[][][][]): [number, number, numbe
   return [west, south, east, north];
 }
 
+function closedRing(ring: number[][]): number[][] {
+  if (!ring.length) return [];
+  const first = ring[0], last = ring[ring.length - 1];
+  return first[0] === last[0] && first[1] === last[1] ? ring : [...ring, [...first]];
+}
+
+function polygonWkt(polygon: number[][][]): string {
+  return `(${polygon.map((ring) => `(${closedRing(ring).map(([lng, lat]) => `${lng} ${lat}`).join(", ")})`).join(", ")})`;
+}
+
+export function geometryToWkt(geometry: number[][][][]): string {
+  if (!geometry.length) return "POLYGON EMPTY";
+  if (geometry.length === 1) return `POLYGON ${polygonWkt(geometry[0])}`;
+  return `MULTIPOLYGON (${geometry.map(polygonWkt).join(", ")})`;
+}
+
+export function encodeGeoPackagePolygon(geometry: number[][][][]): Uint8Array {
+  if (geometry.length !== 1 || !geometry[0]?.length) throw new Error("Solo se pueden exportar geometrías Polygon válidas.");
+  const rings = geometry[0].map(closedRing);
+  if (rings.some((ring) => ring.length < 4)) throw new Error("El polígono necesita al menos tres vértices.");
+  const [minX, minY, maxX, maxY] = geometryBounds([rings]);
+  const wkbBytes = 1 + 4 + 4 + rings.reduce((total, ring) => total + 4 + ring.length * 16, 0);
+  const bytes = new Uint8Array(40 + wkbBytes), view = new DataView(bytes.buffer);
+  bytes[0] = 0x47; bytes[1] = 0x50; bytes[2] = 0; bytes[3] = 3;
+  view.setInt32(4, 4326, true);
+  view.setFloat64(8, minX, true); view.setFloat64(16, maxX, true);
+  view.setFloat64(24, minY, true); view.setFloat64(32, maxY, true);
+  let offset = 40;
+  view.setUint8(offset, 1); offset += 1;
+  view.setUint32(offset, 3, true); offset += 4;
+  view.setUint32(offset, rings.length, true); offset += 4;
+  rings.forEach((ring) => {
+    view.setUint32(offset, ring.length, true); offset += 4;
+    ring.forEach(([lng, lat]) => {
+      view.setFloat64(offset, lng, true); view.setFloat64(offset + 8, lat, true); offset += 16;
+    });
+  });
+  return bytes;
+}
+
 export function parseGeoPackageBinary(blob: Uint8Array): number[][][][] | null {
   if (blob.length < 13 || blob[0] !== 0x47 || blob[1] !== 0x50) return null;
   const flags = blob[3], envelopeIndicator = (flags >> 1) & 7;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findCoordinateColumns, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, sampleExplorerPoints, type ExplorerPoint } from "../app/explorer-core";
+import { encodeGeoPackagePolygon, findCoordinateColumns, geometryToWkt, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, sampleExplorerPoints, type ExplorerPoint } from "../app/explorer-core";
 
 test("detecta latitud y longitud por nombre aunque cambie su posición", () => {
   assert.deepEqual(findCoordinateColumns(["PDV", "Longitud", "Ciudad", "LATITUD"]), { latitude: 3, longitude: 1 });
@@ -54,4 +54,12 @@ test("interpreta un GeoPackage Binary Polygon en EPSG:4326", () => {
   assert.deepEqual(geoPackageEnvelope(new Uint8Array(buffer)), [0, 0, 2, 2]);
   assert.equal(pointInGeometry(1, 1, geometry), true);
   assert.equal(pointInGeometry(3, 1, geometry), false);
+});
+
+test("exporta geometría real a WKT y GeoPackage Binary", () => {
+  const geometry = [[[[0, 0], [3, 0], [3, 2], [0, 2], [0, 0]]]];
+  assert.equal(geometryToWkt(geometry), "POLYGON ((0 0, 3 0, 3 2, 0 2, 0 0))");
+  const binary = encodeGeoPackagePolygon(geometry);
+  assert.deepEqual(geoPackageEnvelope(binary), [0, 0, 3, 2]);
+  assert.deepEqual(parseGeoPackageBinary(binary), geometry);
 });

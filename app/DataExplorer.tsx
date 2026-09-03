@@ -2,14 +2,15 @@
 
 import dynamic from "next/dynamic";
 import { type ChangeEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, Plus, Save, Search, Shapes, Trash2, X } from "lucide-react";
-import { EXPLORER_COLORS, matchesRule, normalizeHeader, sampleExplorerPoints, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
+import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, PenTool, Plus, Save, Search, Shapes, Square, Trash2, X } from "lucide-react";
+import { EXPLORER_COLORS, geometryBounds, matchesRule, normalizeHeader, sampleExplorerPoints, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
 
 const ExplorerMap = dynamic(() => import("./ExplorerMap"), { ssr: false });
 type Bounds = [number, number, number, number];
 type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void };
 type WorkerResponse = { id?: number; type?: string; text?: string; ok?: boolean; payload?: unknown; error?: string };
 type DataInfo = { name: string; count: number; skipped?: number; sourceType?: "excel" | "gpkg"; sheetName?: string; layerName?: string };
+type DrawMode = "rectangle" | "polygon" | null;
 
 function displayValue(value: CellValue) {
   return value == null || value === "" ? "(vacío)" : String(value);
@@ -92,6 +93,7 @@ function downloadBuffer(buffer: ArrayBuffer, name: string, mime: string) {
 
 export default function DataExplorer() {
   const workerRef = useRef<Worker | null>(null), pendingRef = useRef(new Map<number, PendingRequest>()), requestIdRef = useRef(0), boundsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null), latestBoundsRef = useRef<Bounds | null>(null);
+  const drawnCounterRef = useRef(0);
   const [pointInfo, setPointInfo] = useState<DataInfo | null>(null), [polygonInfo, setPolygonInfo] = useState<DataInfo | null>(null);
   const [pointColumns, setPointColumns] = useState<ColumnMeta[]>([]), [polygonColumns, setPolygonColumns] = useState<ColumnMeta[]>([]);
   const [points, setPoints] = useState<ExplorerPoint[]>([]), [polygonView, setPolygonView] = useState<ExplorerPolygon[]>([]);
@@ -100,13 +102,14 @@ export default function DataExplorer() {
   const [filters, setFilters] = useState<FilterRule[]>([]), [filterColumn, setFilterColumn] = useState("");
   const [openValuePicker, setOpenValuePicker] = useState<string | null>(null), [valueSearches, setValueSearches] = useState<Record<string, string>>({});
   const [groupColumn, setGroupColumn] = useState(""), [multiSelect, setMultiSelect] = useState(false);
+  const [drawMode, setDrawMode] = useState<DrawMode>(null), [drawnPolygons, setDrawnPolygons] = useState<ExplorerPolygon[]>([]), [activeDrawnPolygonId, setActiveDrawnPolygonId] = useState<string | null>(null);
   const [coverageFilter, setCoverageFilter] = useState<"Dentro" | "Fuera" | null>(null);
   const [selectedPointIds, setSelectedPointIds] = useState<Set<string>>(new Set()), [selectedPolygonIds, setSelectedPolygonIds] = useState<Set<string>>(new Set());
   const [editColumn, setEditColumn] = useState(""), [editValue, setEditValue] = useState("");
   const [newColumnName, setNewColumnName] = useState(""), [newColumnKind, setNewColumnKind] = useState<ColumnKind>("text"), [newColumnValue, setNewColumnValue] = useState("");
   const [dropColumn, setDropColumn] = useState("");
   const [busy, setBusy] = useState(""), [progress, setProgress] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState("");
-  const [dataVersion, setDataVersion] = useState(0), [openPanel, setOpenPanel] = useState<"filters" | "groups" | "columns" | null>("filters");
+  const [dataVersion, setDataVersion] = useState(0), [openPanel, setOpenPanel] = useState<"filters" | "groups" | "draw" | "columns" | null>("filters");
 
   useEffect(() => {
     const worker = new Worker(new URL("./explorer.worker.ts", import.meta.url), { type: "module" });
@@ -246,6 +249,20 @@ export default function DataExplorer() {
   };
   const selectMultiplePoints = (selected: ExplorerPoint[]) => { setSelectedPointIds(new Set(selected.map((point) => point.id))); setSelectedPolygonIds(new Set()); setEditColumn(pointColumns[0]?.name ?? ""); setEditValue(""); };
   const clearSelection = () => { setSelectedPointIds(new Set()); setSelectedPolygonIds(new Set()); setEditColumn(""); setEditValue(""); };
+  const startDrawing = (mode: Exclude<DrawMode, null>) => {
+    clearSelection(); setMultiSelect(false); setActiveDrawnPolygonId(null); setDrawMode(mode); setOpenPanel("draw"); setNotice("");
+  };
+  const finishDrawing = useCallback((geometry: number[][][][]) => {
+    const sequence = ++drawnCounterRef.current, id = `manual-${Date.now()}-${sequence}`;
+    const polygon: ExplorerPolygon = { id, rowIndex: sequence, bbox: geometryBounds(geometry), geometry, attributes: { DESCRIPCION: `Polígono ${sequence}` } };
+    setDrawnPolygons((current) => [...current, polygon]); setActiveDrawnPolygonId(id); setDrawMode(null); setOpenPanel("draw");
+    setNotice(`Polígono ${sequence} creado. Puedes escribir su descripción y continuar dibujando.`);
+  }, []);
+  const renameDrawnPolygon = (id: string, description: string) => setDrawnPolygons((current) => current.map((polygon) => polygon.id === id ? { ...polygon, attributes: { ...polygon.attributes, DESCRIPCION: description } } : polygon));
+  const removeDrawnPolygon = (id: string) => {
+    setDrawnPolygons((current) => current.filter((polygon) => polygon.id !== id));
+    setActiveDrawnPolygonId((current) => current === id ? null : current);
+  };
 
   const applyEdit = async () => {
     if (!selectedCount || !editColumn || busy) return;
@@ -301,6 +318,17 @@ export default function DataExplorer() {
     finally { setBusy(""); setProgress(""); }
   };
 
+  const downloadDrawn = async (target: "xlsx" | "gpkg") => {
+    if (!drawnPolygons.length || busy) return;
+    setBusy(`drawn-${target}`); setError(""); setProgress(target === "xlsx" ? "Preparando polígonos en Excel…" : "Construyendo GeoPackage para QGIS…");
+    try {
+      const result = await workerCall(target === "xlsx" ? "export-drawn-xlsx" : "export-drawn-gpkg", { polygons: drawnPolygons }) as { buffer: ArrayBuffer; name: string; mime: string };
+      downloadBuffer(result.buffer, result.name, result.mime);
+      setNotice(`${drawnPolygons.length.toLocaleString()} polígono${drawnPolygons.length === 1 ? "" : "s"} exportado${drawnPolygons.length === 1 ? "" : "s"} en ${target === "xlsx" ? "Excel con WKT" : "GeoPackage EPSG:4326 para QGIS"}.`);
+    } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible exportar los polígonos dibujados."); }
+    finally { setBusy(""); setProgress(""); }
+  };
+
   return <section className="explorer-workspace animate-fade-up">
     <div className="explorer-intro"><div><span className="section-kicker"><MapPinned size={14} /> EXPLORADOR GEOGRÁFICO</span><h2>Carga, cruza y edita cualquier base</h2><p>Solo LATITUD y LONGITUD son obligatorias. El resto de columnas se convierte en filtros, colores y campos editables.</p></div><span className="explorer-mode-badge"><Layers3 size={15} /> Espacio independiente</span></div>
     <div className="explorer-upload-grid">
@@ -335,11 +363,27 @@ export default function DataExplorer() {
         </div>}
         <button className="rail-section-trigger" onClick={() => setOpenPanel(openPanel === "groups" ? null : "groups")}><span><Palette size={15} /> Agrupaciones</span><ChevronDown className={openPanel === "groups" ? "rotated" : ""} size={16} /></button>
         {openPanel === "groups" && <div className="rail-section-body"><label className="rail-label"><span>Colorear el mapa por</span><select value={groupColumn} onChange={(event) => setGroupColumn(event.target.value)}>{activeColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select></label><p className="rail-empty">Cada valor diferente recibe un color estable en el mapa.</p></div>}
+        <button className="rail-section-trigger draw-section-trigger" onClick={() => setOpenPanel(openPanel === "draw" ? null : "draw")}><span><PenTool size={15} /> Crear polígonos {drawnPolygons.length > 0 && <b>{drawnPolygons.length}</b>}</span><ChevronDown className={openPanel === "draw" ? "rotated" : ""} size={16} /></button>
+        {openPanel === "draw" && <div className="rail-section-body draw-section-body">
+          <p className="rail-empty">Dibuja zonas sobre el universo cargado. Cada figura se guarda como geometría real EPSG:4326.</p>
+          <div className="draw-mode-grid">
+            <button type="button" className={drawMode === "rectangle" ? "active" : ""} onClick={() => startDrawing("rectangle")}><Square size={16} /><span><b>Rectángulo</b><small>Marca 2 esquinas</small></span></button>
+            <button type="button" className={drawMode === "polygon" ? "active" : ""} onClick={() => startDrawing("polygon")}><Shapes size={16} /><span><b>Polígono libre</b><small>Marca sus vértices</small></span></button>
+          </div>
+          {drawMode && <div className="draw-status"><i /><span><b>Modo dibujo activo</b><small>Usa las instrucciones sobre el mapa para terminar o cancelar.</small></span></div>}
+          {!!drawnPolygons.length && <>
+            <div className="drawn-heading"><span>Zonas creadas</span><b>{drawnPolygons.length}</b></div>
+            <div className="drawn-polygon-list">{drawnPolygons.map((polygon, index) => <div className={`drawn-polygon-row${activeDrawnPolygonId === polygon.id ? " active" : ""}`} key={polygon.id}>
+              <span className="drawn-index">{index + 1}</span><input aria-label={`Descripción del polígono ${index + 1}`} value={String(polygon.attributes.DESCRIPCION ?? "")} placeholder="Ej. Zona peligrosa" onFocus={() => setActiveDrawnPolygonId(polygon.id)} onChange={(event) => renameDrawnPolygon(polygon.id, event.target.value)} /><button type="button" aria-label={`Eliminar polígono ${index + 1}`} onClick={(event) => { event.stopPropagation(); removeDrawnPolygon(polygon.id); }}><Trash2 size={14} /></button>
+            </div>)}</div>
+            <div className="draw-export-actions"><button type="button" onClick={() => downloadDrawn("xlsx")} disabled={Boolean(busy)}><FileSpreadsheet size={15} /> Excel WKT</button><button type="button" onClick={() => downloadDrawn("gpkg")} disabled={Boolean(busy)}><Download size={15} /> GPKG para QGIS</button></div>
+          </>}
+        </div>}
         <button className="rail-section-trigger" onClick={() => setOpenPanel(openPanel === "columns" ? null : "columns")}><span><Columns3 size={15} /> Columnas</span><ChevronDown className={openPanel === "columns" ? "rotated" : ""} size={16} /></button>
         {openPanel === "columns" && <div className="rail-section-body"><label className="rail-label"><span>Nueva columna</span><input value={newColumnName} placeholder="Ej. REVISADO" onChange={(event) => setNewColumnName(event.target.value)} /></label><div className="column-pair"><select value={newColumnKind} onChange={(event) => setNewColumnKind(event.target.value as ColumnKind)}><option value="text">Texto</option><option value="number">Número</option><option value="boolean">Sí / No</option></select><input value={newColumnValue} type={newColumnKind === "number" ? "number" : "text"} placeholder="Valor por defecto" onChange={(event) => setNewColumnValue(event.target.value)} /></div><button className="rail-primary" onClick={addColumn} disabled={!newColumnName.trim() || Boolean(busy)}><Plus size={15} /> Crear para todos</button>{polygonInfo && !pointInfo && <><div className="rail-divider" /><label className="rail-label"><span>Eliminar columna del polígono</span><select value={dropColumn} onChange={(event) => setDropColumn(event.target.value)}><option value="">Selecciona una columna</option>{polygonColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select></label><button className="rail-danger" onClick={removePolygonColumn} disabled={!dropColumn || Boolean(busy)}><Trash2 size={14} /> Eliminar columna</button></>}</div>}
       </aside>
       <section className="explorer-canvas">
-        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
+        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}{drawnPolygons.length ? ` · ${drawnPolygons.length.toLocaleString()} dibujado${drawnPolygons.length === 1 ? "" : "s"}` : ""}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} disabled={Boolean(drawMode)} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
         {coverageReady && <div className="coverage-summary" aria-label="Filtros rápidos de cobertura">
           <button type="button" className={`inside${coverageFilter === "Dentro" ? " active" : ""}`} aria-pressed={coverageFilter === "Dentro"} onClick={() => setCoverageFilter((current) => current === "Dentro" ? null : "Dentro")}><i /> Dentro <b>{coverageSummary.inside.toLocaleString()}</b></button>
           <button type="button" className={`outside${coverageFilter === "Fuera" ? " active" : ""}`} aria-pressed={coverageFilter === "Fuera"} onClick={() => setCoverageFilter((current) => current === "Fuera" ? null : "Fuera")}><i /> Fuera <b>{coverageSummary.outside.toLocaleString()}</b></button>
@@ -348,7 +392,7 @@ export default function DataExplorer() {
         {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. La selección múltiple actúa sobre los puntos visibles; usa filtros si necesitas reducir el universo.</p>}
         {polygonViewMeta.limited && <p className="polygon-performance-note">Vista general optimizada: la cobertura exacta se muestra en el contorno verde o rojo de cada punto. Acércate para dibujar los polígonos individuales sin saturar el mapa.</p>}
         {multiSelect && <p className="map-selection-help"><BoxSelect size={15} /> {activeIsPoints ? "Arrastra un rectángulo sobre los puntos que deseas editar." : "Haz clic en varios polígonos para agregarlos o quitarlos de la selección."}</p>}
-        <ExplorerMap points={mapPoints} polygons={mapPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />
+        <ExplorerMap points={mapPoints} polygons={mapPolygons} drawnPolygons={drawnPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} drawMode={drawMode} activeDrawnPolygonId={activeDrawnPolygonId} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onDrawComplete={finishDrawing} onDrawnPolygonClick={(polygon) => { setActiveDrawnPolygonId(polygon.id); setOpenPanel("draw"); }} onCancelDraw={() => setDrawMode(null)} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />
         <div className="explorer-legend"><span>Agrupado por <b>{groupColumn || "sin agrupación"}</b></span><div>{groupLegend.map((value) => <i key={value}><em style={{ background: colorFor(value) }} />{value}</i>)}{groupLegend.length >= 40 && <i>+ más valores</i>}</div></div>
       </section>
     </div>}

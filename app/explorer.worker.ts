@@ -3,7 +3,7 @@
 import * as XLSX from "xlsx";
 import initSqlJs, { type Database } from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import { boundsIntersect, findCoordinateColumns, geoPackageEnvelope, geometryBounds, inferColumnKind, normalizeHeader, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, simplifyGeometry, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon } from "./explorer-core";
+import { boundsIntersect, encodeGeoPackagePolygon, findCoordinateColumns, geometryToWkt, geoPackageEnvelope, geometryBounds, inferColumnKind, normalizeHeader, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, simplifyGeometry, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon } from "./explorer-core";
 
 type WorkerRequest = { id: number; type: string; payload?: Record<string, unknown> };
 type Bounds = [number, number, number, number];
@@ -384,6 +384,80 @@ function workbookBuffer(workbook: XLSX.WorkBook): ArrayBuffer {
   return output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength) as ArrayBuffer;
 }
 
+function exportDrawnExcel(drawn: ExplorerPolygon[]) {
+  const rows = drawn.map((polygon, index) => ({
+    ID: index + 1,
+    DESCRIPCION: String(polygon.attributes.DESCRIPCION ?? `Polígono ${index + 1}`),
+    WKT: geometryToWkt(polygon.geometry),
+  }));
+  const workbook = XLSX.utils.book_new(), worksheet = XLSX.utils.json_to_sheet(rows, { header: ["ID", "DESCRIPCION", "WKT"] });
+  worksheet["!cols"] = [{ wch: 10 }, { wch: 42 }, { wch: 95 }];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "POLIGONOS");
+  return { buffer: workbookBuffer(workbook), name: "POLIGONOS_DIBUJADOS.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+}
+
+async function exportDrawnGeoPackage(drawn: ExplorerPolygon[]) {
+  const SQL = await initSqlJs({ locateFile: () => wasmUrl }), db = new SQL.Database();
+  const extent = drawn.reduce<Bounds | null>((current, polygon) => mergeExtent(current, polygon.bbox), null);
+  if (!extent) throw new Error("No hay polígonos dibujados para exportar.");
+  db.run(`
+    PRAGMA application_id = 1196444487;
+    PRAGMA user_version = 10300;
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE gpkg_spatial_ref_sys (
+      srs_name TEXT NOT NULL,
+      srs_id INTEGER NOT NULL PRIMARY KEY,
+      organization TEXT NOT NULL,
+      organization_coordsys_id INTEGER NOT NULL,
+      definition TEXT NOT NULL,
+      description TEXT
+    );
+    CREATE TABLE gpkg_contents (
+      table_name TEXT NOT NULL PRIMARY KEY,
+      data_type TEXT NOT NULL,
+      identifier TEXT UNIQUE,
+      description TEXT DEFAULT '',
+      last_change DATETIME NOT NULL,
+      min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE,
+      srs_id INTEGER,
+      CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+    );
+    CREATE TABLE gpkg_geometry_columns (
+      table_name TEXT NOT NULL,
+      column_name TEXT NOT NULL,
+      geometry_type_name TEXT NOT NULL,
+      srs_id INTEGER NOT NULL,
+      z TINYINT NOT NULL,
+      m TINYINT NOT NULL,
+      PRIMARY KEY (table_name, column_name),
+      CONSTRAINT fk_gc_tn FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),
+      CONSTRAINT fk_gc_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+    );
+    CREATE TABLE poligonos_dibujados (
+      fid INTEGER PRIMARY KEY AUTOINCREMENT,
+      geom BLOB NOT NULL,
+      descripcion TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  const insertSrs = db.prepare("INSERT INTO gpkg_spatial_ref_sys (srs_name, srs_id, organization, organization_coordsys_id, definition, description) VALUES (?, ?, ?, ?, ?, ?)");
+  [
+    ["Undefined Cartesian", -1, "NONE", -1, "undefined", "undefined Cartesian coordinate reference system"],
+    ["Undefined geographic", 0, "NONE", 0, "undefined", "undefined geographic coordinate reference system"],
+    ["WGS 84 geodetic", 4326, "EPSG", 4326, 'GEOGCS["WGS 84",DATUM["World Geodetic System 1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]', "longitude/latitude coordinates in decimal degrees on the WGS 84 spheroid"],
+  ].forEach((row) => { insertSrs.run(row as (string | number)[]); insertSrs.reset(); });
+  insertSrs.free();
+  db.run("INSERT INTO gpkg_contents (table_name, data_type, identifier, description, last_change, min_x, min_y, max_x, max_y, srs_id) VALUES (?, 'features', ?, ?, ?, ?, ?, ?, ?, 4326)", ["poligonos_dibujados", "Polígonos dibujados", "Zonas creadas manualmente en el explorador geográfico", new Date().toISOString(), extent[0], extent[1], extent[2], extent[3]]);
+  db.run("INSERT INTO gpkg_geometry_columns (table_name, column_name, geometry_type_name, srs_id, z, m) VALUES (?, ?, 'POLYGON', 4326, 0, 0)", ["poligonos_dibujados", "geom"]);
+  const insertFeature = db.prepare("INSERT INTO poligonos_dibujados (geom, descripcion) VALUES (?, ?)");
+  drawn.forEach((polygon, index) => {
+    insertFeature.run([encodeGeoPackagePolygon(polygon.geometry), String(polygon.attributes.DESCRIPCION ?? `Polígono ${index + 1}`)]);
+    insertFeature.reset();
+  });
+  insertFeature.free();
+  const bytes = db.export(); db.close();
+  return { buffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, name: "POLIGONOS_DIBUJADOS.gpkg", mime: "application/geopackage+sqlite3" };
+}
+
 async function handleRequest(request: WorkerRequest) {
   const payload = request.payload ?? {};
   if (request.type === "load-points") return loadPoints(payload.buffer as ArrayBuffer, String(payload.name ?? "PUNTOS.xlsx"));
@@ -436,6 +510,12 @@ async function handleRequest(request: WorkerRequest) {
   if (request.type === "drop-polygon-column") {
     dropPolygonColumn(String(payload.column));
     return { columns: polygonColumns, view: polygonView(payload.bounds as Bounds | undefined) };
+  }
+  if (request.type === "export-drawn-xlsx" || request.type === "export-drawn-gpkg") {
+    const drawn = (payload.polygons as ExplorerPolygon[] | undefined) ?? [];
+    if (!drawn.length) throw new Error("Dibuja al menos un polígono antes de exportar.");
+    progress(request.type === "export-drawn-xlsx" ? "Preparando el Excel con geometrías WKT…" : "Construyendo el GeoPackage EPSG:4326…");
+    return request.type === "export-drawn-xlsx" ? exportDrawnExcel(drawn) : exportDrawnGeoPackage(drawn);
   }
   if (request.type === "download-points") {
     if (!pointSheet) throw new Error("No hay un Excel de puntos para descargar.");
