@@ -36,12 +36,65 @@ export type FilterRule = {
   selectedValues?: string[];
 };
 
-export const EXPLORER_COLORS = [
-  "#7148e8", "#1099c6", "#ef066f", "#2f9e44", "#e8590c", "#087f5b",
-  "#d6336c", "#1971c2", "#e5a50a", "#9c36b5", "#12b886", "#c2255c",
-  "#20c997", "#364fc7", "#f76707", "#0ca678", "#9c36b5", "#4c6ef5",
-  "#d9480f", "#2b8a3e", "#ae3ec9", "#15aabf", "#e03131", "#66a80f",
-];
+function hslToHex(hue: number, saturation: number, lightness: number) {
+  const light = lightness / 100, chroma = (saturation * Math.min(light, 1 - light)) / 100;
+  const channel = (offset: number) => {
+    const position = (offset + hue / 30) % 12;
+    const value = light - chroma * Math.max(Math.min(position - 3, 9 - position, 1), -1);
+    return Math.round(255 * value).toString(16).padStart(2, "0");
+  };
+  return `#${channel(0)}${channel(8)}${channel(4)}`;
+}
+
+const COLOR_GOLDEN_ANGLE = 137.507764;
+
+export function categoryColor(index: number): string {
+  const safeIndex = Math.max(0, Math.trunc(index)), hue = (205 + safeIndex * COLOR_GOLDEN_ANGLE) % 360;
+  const saturation = 72 + (safeIndex % 3) * 9;
+  let lightness = 42 + (safeIndex % 2) * 8;
+  if (hue >= 42 && hue <= 72) lightness = 40 + (safeIndex % 2) * 7;
+  else if (hue >= 82 && hue <= 165) lightness = 36 + (safeIndex % 3) * 5;
+  return hslToHex(hue, saturation, lightness);
+}
+
+export const EXPLORER_COLORS = Array.from({ length: 72 }, (_, index) => categoryColor(index));
+
+type SpatialPoint = { x: number; y: number; z: number; index: number };
+type SpatialNode = { point: SpatialPoint; axis: 0 | 1 | 2; left: SpatialNode | null; right: SpatialNode | null };
+
+function buildSpatialTree(items: SpatialPoint[], depth = 0): SpatialNode | null {
+  if (!items.length) return null;
+  const axis = (depth % 3) as 0 | 1 | 2, coordinate = axis === 0 ? "x" : axis === 1 ? "y" : "z";
+  items.sort((left, right) => left[coordinate] - right[coordinate]);
+  const middle = Math.floor(items.length / 2);
+  return { point: items[middle], axis, left: buildSpatialTree(items.slice(0, middle), depth + 1), right: buildSpatialTree(items.slice(middle + 1), depth + 1) };
+}
+
+function nearestChordSquared(node: SpatialNode | null, target: SpatialPoint, best = Infinity): number {
+  if (!node) return best;
+  const dx = target.x - node.point.x, dy = target.y - node.point.y, dz = target.z - node.point.z;
+  if (target.index !== node.point.index) best = Math.min(best, dx * dx + dy * dy + dz * dz);
+  const delta = node.axis === 0 ? dx : node.axis === 1 ? dy : dz;
+  const near = delta <= 0 ? node.left : node.right, far = delta <= 0 ? node.right : node.left;
+  best = nearestChordSquared(near, target, best);
+  if (delta * delta < best) best = nearestChordSquared(far, target, best);
+  return best;
+}
+
+export function averageNearestNeighborMeters(points: ReadonlyArray<{ lat: number; lng: number }>): number | null {
+  if (points.length < 2) return null;
+  const spatial = points.map((point, index) => {
+    const latitude = point.lat * Math.PI / 180, longitude = point.lng * Math.PI / 180, latitudeCosine = Math.cos(latitude);
+    return { x: latitudeCosine * Math.cos(longitude), y: latitudeCosine * Math.sin(longitude), z: Math.sin(latitude), index };
+  });
+  const tree = buildSpatialTree([...spatial]);
+  const earthRadiusMeters = 6371008.8;
+  const total = spatial.reduce((sum, point) => {
+    const chord = Math.sqrt(nearestChordSquared(tree, point));
+    return sum + 2 * earthRadiusMeters * Math.asin(Math.min(1, chord / 2));
+  }, 0);
+  return total / spatial.length;
+}
 
 export function normalizeHeader(value: unknown): string {
   return String(value ?? "").trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();

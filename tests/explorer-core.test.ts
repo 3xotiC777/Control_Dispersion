@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encodeGeoPackagePolygon, findCoordinateColumns, geometryToWkt, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, sampleExplorerPoints, type ExplorerPoint } from "../app/explorer-core";
+import { averageNearestNeighborMeters, categoryColor, encodeGeoPackagePolygon, findCoordinateColumns, geometryToWkt, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, sampleExplorerPoints, type ExplorerPoint } from "../app/explorer-core";
 
 test("detecta latitud y longitud por nombre aunque cambie su posición", () => {
   assert.deepEqual(findCoordinateColumns(["PDV", "Longitud", "Ciudad", "LATITUD"]), { latitude: 3, longitude: 1 });
@@ -62,4 +62,11 @@ test("exporta geometría real a WKT y GeoPackage Binary", () => {
   const binary = encodeGeoPackagePolygon(geometry);
   assert.deepEqual(geoPackageEnvelope(binary), [0, 0, 3, 2]);
   assert.deepEqual(parseGeoPackageBinary(binary), geometry);
+});
+
+test("genera colores distintos y calcula distancia al vecino más cercano", () => {
+  assert.equal(new Set(Array.from({ length: 40 }, (_, index) => categoryColor(index))).size, 40);
+  const average = averageNearestNeighborMeters([{ lat: 0, lng: 0 }, { lat: 0, lng: 0.001 }]);
+  assert.ok(average && average > 111 && average < 112);
+  assert.equal(averageNearestNeighborMeters([{ lat: 0, lng: 0 }]), null);
 });

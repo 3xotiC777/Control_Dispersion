@@ -34,15 +34,17 @@ export function getMtColor(index: number): string {
   return hslToHex(h, s, l);
 }
 
-// 32 distinct, high-contrast colors for Day 1..31
-const COLORS = [
-  "#1099c6", "#ef066f", "#2f9e44", "#5f3dc4", "#e8590c", "#087f5b",
-  "#d6336c", "#1971c2", "#e5a50a", "#7c3aed", "#12b886", "#c2255c",
-  "#20c997", "#364fc7", "#f76707", "#0ca678", "#9c36b5", "#4c6ef5",
-  "#d9480f", "#2b8a3e", "#ae3ec9", "#15aabf", "#e03131", "#66a80f",
-  "#845ef7", "#099268", "#f03e3e", "#5c7cfa", "#f59f00", "#1098ad",
-  "#a61e4d", "#7048e8"
-];
+export function getDayColor(day: number): string {
+  const index = Math.max(0, Math.trunc(day) - 1), hue = (205 + index * GOLDEN_ANGLE) % 360;
+  const saturation = 72 + (index % 3) * 9;
+  let lightness = 42 + (index % 2) * 8;
+  if (hue >= 42 && hue <= 72) lightness = 40 + (index % 2) * 7;
+  else if (hue >= 82 && hue <= 165) lightness = 36 + (index % 3) * 5;
+  return hslToHex(hue, saturation, lightness);
+}
+
+// Golden-angle spacing keeps consecutive days visually separated without repeating.
+const COLORS = Array.from({ length: 72 }, (_, index) => getDayColor(index + 1));
 
 type Busy = "base" | "forecast" | "calculate" | "download" | "qa" | "move" | "bulk-move" | null;
 type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void };

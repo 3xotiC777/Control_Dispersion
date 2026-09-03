@@ -2,8 +2,8 @@
 
 import dynamic from "next/dynamic";
 import { type ChangeEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, PenTool, Plus, Save, Search, Shapes, Square, Trash2, X } from "lucide-react";
-import { EXPLORER_COLORS, geometryBounds, matchesRule, normalizeHeader, sampleExplorerPoints, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
+import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, PenTool, Plus, Ruler, Save, Search, Shapes, Square, Trash2, X } from "lucide-react";
+import { averageNearestNeighborMeters, categoryColor, geometryBounds, matchesRule, normalizeHeader, sampleExplorerPoints, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
 
 const ExplorerMap = dynamic(() => import("./ExplorerMap"), { ssr: false });
 type Bounds = [number, number, number, number];
@@ -18,9 +18,11 @@ function displayValue(value: CellValue) {
 
 function colorFor(value: CellValue) {
   const text = displayValue(value);
+  const numericCategory = text.match(/^(?:D[IÍ]A\s*)?(\d+)$/i);
+  if (numericCategory) return categoryColor(Math.max(0, Number(numericCategory[1]) - 1));
   let hash = 0;
   for (let index = 0; index < text.length; index++) hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
-  return EXPLORER_COLORS[Math.abs(hash) % EXPLORER_COLORS.length];
+  return categoryColor(Math.abs(hash));
 }
 
 const textOperators: { value: FilterOperator; label: string }[] = [
@@ -188,6 +190,9 @@ export default function DataExplorer() {
   const deferredFilters = useDeferredValue(appliedFilters);
   const attributeFilteredPoints = useMemo(() => points.filter((point) => deferredFilters.every((rule) => matchesRule(point.attributes, rule))), [points, deferredFilters]);
   const filteredPoints = useMemo(() => coverageFilter ? attributeFilteredPoints.filter((point) => point.coverage === coverageFilter) : attributeFilteredPoints, [attributeFilteredPoints, coverageFilter]);
+  const distancePoints = useDeferredValue(filteredPoints);
+  const nearestPointDistance = useMemo(() => averageNearestNeighborMeters(distancePoints), [distancePoints]);
+  const distancePending = distancePoints !== filteredPoints;
   const filteredPolygons = useMemo(() => activeIsPoints ? polygonView : polygonView.filter((polygon) => deferredFilters.every((rule) => matchesRule(polygon.attributes, rule))), [activeIsPoints, polygonView, deferredFilters]);
   const coverageSummary = useMemo(() => attributeFilteredPoints.reduce((summary, point) => {
     if (point.coverage === "Dentro") summary.inside++;
@@ -383,7 +388,7 @@ export default function DataExplorer() {
         {openPanel === "columns" && <div className="rail-section-body"><label className="rail-label"><span>Nueva columna</span><input value={newColumnName} placeholder="Ej. REVISADO" onChange={(event) => setNewColumnName(event.target.value)} /></label><div className="column-pair"><select value={newColumnKind} onChange={(event) => setNewColumnKind(event.target.value as ColumnKind)}><option value="text">Texto</option><option value="number">Número</option><option value="boolean">Sí / No</option></select><input value={newColumnValue} type={newColumnKind === "number" ? "number" : "text"} placeholder="Valor por defecto" onChange={(event) => setNewColumnValue(event.target.value)} /></div><button className="rail-primary" onClick={addColumn} disabled={!newColumnName.trim() || Boolean(busy)}><Plus size={15} /> Crear para todos</button>{polygonInfo && !pointInfo && <><div className="rail-divider" /><label className="rail-label"><span>Eliminar columna del polígono</span><select value={dropColumn} onChange={(event) => setDropColumn(event.target.value)}><option value="">Selecciona una columna</option>{polygonColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select></label><button className="rail-danger" onClick={removePolygonColumn} disabled={!dropColumn || Boolean(busy)}><Trash2 size={14} /> Eliminar columna</button></>}</div>}
       </aside>
       <section className="explorer-canvas">
-        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}{drawnPolygons.length ? ` · ${drawnPolygons.length.toLocaleString()} dibujado${drawnPolygons.length === 1 ? "" : "s"}` : ""}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} disabled={Boolean(drawMode)} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
+        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}{drawnPolygons.length ? ` · ${drawnPolygons.length.toLocaleString()} dibujado${drawnPolygons.length === 1 ? "" : "s"}` : ""}</p></div><div className="explorer-map-actions">{activeIsPoints && <article className={`explorer-distance-card${distancePending ? " pending" : ""}`} aria-live="polite"><i><Ruler size={17} /></i><div><span>Distancia entre puntos</span><strong>{nearestPointDistance == null ? "—" : `${Math.round(nearestPointDistance).toLocaleString()} m`}</strong><small>{nearestPointDistance == null ? "Se necesitan al menos 2 puntos" : "promedio al vecino filtrado más cercano"}</small></div></article>}<button className={multiSelect ? "active" : ""} disabled={Boolean(drawMode)} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
         {coverageReady && <div className="coverage-summary" aria-label="Filtros rápidos de cobertura">
           <button type="button" className={`inside${coverageFilter === "Dentro" ? " active" : ""}`} aria-pressed={coverageFilter === "Dentro"} onClick={() => setCoverageFilter((current) => current === "Dentro" ? null : "Dentro")}><i /> Dentro <b>{coverageSummary.inside.toLocaleString()}</b></button>
           <button type="button" className={`outside${coverageFilter === "Fuera" ? " active" : ""}`} aria-pressed={coverageFilter === "Fuera"} onClick={() => setCoverageFilter((current) => current === "Fuera" ? null : "Fuera")}><i /> Fuera <b>{coverageSummary.outside.toLocaleString()}</b></button>
