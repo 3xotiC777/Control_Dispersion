@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { type ChangeEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, Plus, Save, Search, Shapes, Trash2, X } from "lucide-react";
-import { EXPLORER_COLORS, matchesRule, normalizeHeader, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
+import { EXPLORER_COLORS, matchesRule, normalizeHeader, sampleExplorerPoints, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
 
 const ExplorerMap = dynamic(() => import("./ExplorerMap"), { ssr: false });
 type Bounds = [number, number, number, number];
@@ -20,21 +20,6 @@ function colorFor(value: CellValue) {
   let hash = 0;
   for (let index = 0; index < text.length; index++) hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
   return EXPLORER_COLORS[Math.abs(hash) % EXPLORER_COLORS.length];
-}
-
-function samplePoints(points: ExplorerPoint[], groupColumn: string, limit = 4500) {
-  if (points.length <= limit) return points;
-  const buckets = new Map<string, ExplorerPoint[]>();
-  points.forEach((point) => {
-    const key = displayValue(point.attributes[groupColumn]), bucket = buckets.get(key) ?? [];
-    bucket.push(point); buckets.set(key, bucket);
-  });
-  const result: ExplorerPoint[] = [];
-  buckets.forEach((bucket) => {
-    const quota = Math.max(1, Math.floor(limit * bucket.length / points.length)), stride = bucket.length / quota;
-    for (let index = 0; index < quota && result.length < limit; index++) result.push(bucket[Math.floor(index * stride)]);
-  });
-  return result;
 }
 
 const textOperators: { value: FilterOperator; label: string }[] = [
@@ -92,7 +77,7 @@ function FilterRuleCard({ rule, column, values, pickerOpen, search, onSearch, on
       {pickerOpen && <div className="filter-values-panel">
         <label className="filter-values-search"><Search size={14} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Buscar en la columna" aria-label={`Buscar valores de ${rule.column}`} /></label>
         <div className="filter-values-actions"><button onClick={toggleVisible}>{allVisibleSelected ? "Quitar visibles" : "Seleccionar visibles"}</button><button onClick={() => onUpdate({ selectedValues: [] })}>Limpiar</button></div>
-        <div className="filter-values-list">{matchingValues.map((value) => <label key={value || "__empty__"}><input type="checkbox" checked={selected.has(value)} onChange={() => toggleValue(value)} /><span>{displayValue(value)}</span></label>)}{!matchingValues.length && <p>No hay coincidencias.</p>}</div>
+        <div className="filter-values-list">{matchingValues.map((value) => <label key={JSON.stringify(value)}><input type="checkbox" checked={selected.has(value)} onChange={() => toggleValue(value)} /><span>{displayValue(value)}</span></label>)}{!matchingValues.length && <p>No hay coincidencias.</p>}</div>
         {values.length > 250 && !search.trim() && <small>Se muestran 250 valores. Usa el buscador para encontrar los demás.</small>}
       </div>}
     </div>}
@@ -145,11 +130,15 @@ export default function DataExplorer() {
   }), []);
 
   const classify = useCallback(async () => {
-    if (!pointInfo || !polygonInfo) return;
-    const result = await workerCall("classify") as { inside: number; outside: number; points: ExplorerPoint[] };
-    setPoints(result.points); setPointColumns((current) => current.some((column) => column.name === "DENTRO_POLIGONO") ? current : [...current, { name: "DENTRO_POLIGONO", kind: "text", sourceIndex: current.length }]);
-    setNotice(`Cobertura calculada: ${result.inside.toLocaleString()} puntos dentro y ${result.outside.toLocaleString()} fuera de los polígonos.`);
-  }, [pointInfo, polygonInfo, workerCall]);
+    if (!pointInfo || !polygonInfo || busy) return;
+    setBusy("coverage"); setError(""); setProgress("Preparando la evaluación de cobertura…");
+    try {
+      const result = await workerCall("classify") as { inside: number; outside: number; points: ExplorerPoint[] };
+      setPoints(result.points); setPointColumns((current) => current.some((column) => column.name === "DENTRO_POLIGONO") ? current : [...current, { name: "DENTRO_POLIGONO", kind: "text", sourceIndex: current.length }]);
+      setNotice(`Cobertura calculada: ${result.inside.toLocaleString()} puntos dentro y ${result.outside.toLocaleString()} fuera de los polígonos.`);
+    } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible evaluar la cobertura."); }
+    finally { setBusy(""); setProgress(""); }
+  }, [pointInfo, polygonInfo, busy, workerCall]);
 
   const handlePointsFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; if (!file || busy) return;
@@ -195,6 +184,12 @@ export default function DataExplorer() {
   const deferredFilters = useDeferredValue(appliedFilters);
   const filteredPoints = useMemo(() => points.filter((point) => deferredFilters.every((rule) => matchesRule(point.attributes, rule))), [points, deferredFilters]);
   const filteredPolygons = useMemo(() => activeIsPoints ? polygonView : polygonView.filter((polygon) => deferredFilters.every((rule) => matchesRule(polygon.attributes, rule))), [activeIsPoints, polygonView, deferredFilters]);
+  const coverageSummary = useMemo(() => filteredPoints.reduce((summary, point) => {
+    if (point.coverage === "Dentro") summary.inside++;
+    else if (point.coverage === "Fuera") summary.outside++;
+    return summary;
+  }, { inside: 0, outside: 0 }), [filteredPoints]);
+  const coverageReady = coverageSummary.inside + coverageSummary.outside > 0;
   const valueModeColumnsKey = [...new Set(filters.filter((rule) => rule.mode === "values").map((rule) => rule.column))].sort().join("\u0000");
   const filterValuesByColumn = useMemo(() => {
     const columnNames = valueModeColumnsKey ? valueModeColumnsKey.split("\u0000") : [], result = new Map<string, string[]>();
@@ -205,8 +200,9 @@ export default function DataExplorer() {
     sets.forEach((values, name) => result.set(name, [...values].sort((a, b) => displayValue(a).localeCompare(displayValue(b), undefined, { numeric: true }))));
     return result;
   }, [activeIsPoints, points, polygonView, valueModeColumnsKey]);
-  const mapPoints = useMemo(() => samplePoints(filteredPoints, groupColumn), [filteredPoints, groupColumn]);
+  const mapPoints = useMemo(() => sampleExplorerPoints(filteredPoints, groupColumn), [filteredPoints, groupColumn]);
   const mapLimited = filteredPoints.length > mapPoints.length;
+  const mapPolygons = activeIsPoints && polygonViewMeta.limited ? [] : filteredPolygons;
   const groupLegend = useMemo(() => {
     const values = new Set<string>();
     if (activeIsPoints) mapPoints.forEach((point) => values.add(displayValue(point.attributes[groupColumn])));
@@ -342,10 +338,11 @@ export default function DataExplorer() {
       </aside>
       <section className="explorer-canvas">
         <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
+        {coverageReady && <div className="coverage-summary" aria-label="Resumen de cobertura de los puntos filtrados"><span className="inside"><i /> Dentro <b>{coverageSummary.inside.toLocaleString()}</b></span><span className="outside"><i /> Fuera <b>{coverageSummary.outside.toLocaleString()}</b></span><small>El color central conserva la agrupación; el contorno indica la cobertura.</small></div>}
         {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. La selección múltiple actúa sobre los puntos visibles; usa filtros si necesitas reducir el universo.</p>}
-        {polygonViewMeta.limited && <p className="polygon-performance-note">Se dibujan {polygonView.length.toLocaleString()} de {polygonViewMeta.total.toLocaleString()} polígonos en esta vista. Acércate para ver el detalle completo.</p>}
+        {polygonViewMeta.limited && <p className="polygon-performance-note">Vista general optimizada: la cobertura exacta se muestra en el contorno verde o rojo de cada punto. Acércate para dibujar los polígonos individuales sin saturar el mapa.</p>}
         {multiSelect && <p className="map-selection-help"><BoxSelect size={15} /> {activeIsPoints ? "Arrastra un rectángulo sobre los puntos que deseas editar." : "Haz clic en varios polígonos para agregarlos o quitarlos de la selección."}</p>}
-        <ExplorerMap points={mapPoints} polygons={filteredPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />
+        <ExplorerMap points={mapPoints} polygons={mapPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />
         <div className="explorer-legend"><span>Agrupado por <b>{groupColumn || "sin agrupación"}</b></span><div>{groupLegend.map((value) => <i key={value}><em style={{ background: colorFor(value) }} />{value}</i>)}{groupLegend.length >= 40 && <i>+ más valores</i>}</div></div>
       </section>
     </div>}

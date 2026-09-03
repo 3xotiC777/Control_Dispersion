@@ -111,8 +111,9 @@ export default function ExplorerMap({
       >{!multiSelect && <Popup><FeatureDetails attributes={polygon.attributes} /><button onClick={() => onPolygonClick(polygon)}>Editar polígono</button></Popup>}</Polygon>);
     })}
     {points.map((point) => {
-      const selected = selectedPointIds.has(point.id), color = pointColor(point);
-      return <CircleMarker key={point.id} center={[point.lat, point.lng]} radius={selected ? 7 : 5} pathOptions={{ color: selected ? "#211841" : "#fff", weight: selected ? 3 : 1.5, fillColor: color, fillOpacity: 0.94 }} eventHandlers={{ click: () => { if (!multiSelect) onPointClick(point); } }}>
+      const selected = selectedPointIds.has(point.id), color = pointColor(point), outside = point.coverage === "Fuera", inside = point.coverage === "Dentro";
+      const outline = selected ? "#211841" : outside ? "#dc2626" : inside ? "#087f5b" : "#fff";
+      return <CircleMarker key={point.id} center={[point.lat, point.lng]} radius={selected ? 8 : outside ? 7 : 5.5} pathOptions={{ color: outline, weight: selected ? 3.5 : outside ? 3.5 : inside ? 2.25 : 1.5, fillColor: color, fillOpacity: 0.94 }} eventHandlers={{ click: () => { if (!multiSelect) onPointClick(point); } }}>
         {!multiSelect && <Popup><FeatureDetails attributes={point.attributes} /><button onClick={() => onPointClick(point)}>Editar punto</button></Popup>}
       </CircleMarker>;
     })}

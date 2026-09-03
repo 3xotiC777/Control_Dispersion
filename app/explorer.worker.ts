@@ -145,40 +145,71 @@ function classifyPoints(): { inside: number; outside: number } {
   if (gpkgDb && gpkgIndex.length) {
     const extent = polygonExtent!, area = Math.max(0.0001, (extent[2] - extent[0]) * (extent[3] - extent[1]));
     const cellSize = Math.max(0.003, Math.min(1, Math.sqrt(area / gpkgIndex.length) * 2.2));
-    const grid = new Map<string, number[]>(), oversized: number[] = [];
     const cell = (value: number, origin: number) => Math.floor((value - origin) / cellSize);
-    gpkgIndex.forEach((entry, index) => {
+    const pointGrid = new Map<string, number[]>();
+    const pointExtent = pointBounds()!;
+    points.forEach((point, pointIndex) => {
+      if (point.lng < extent[0] || point.lng > extent[2] || point.lat < extent[1] || point.lat > extent[3]) return;
+      const key = `${cell(point.lng, extent[0])}:${cell(point.lat, extent[1])}`;
+      const bucket = pointGrid.get(key) ?? [];
+      bucket.push(pointIndex);
+      pointGrid.set(key, bucket);
+    });
+
+    // Index the small point set instead of duplicating 1M+ polygon indexes in a grid.
+    // The inverted map lets us fetch every required geometry in SQLite batches.
+    const candidatePoints = new Map<string, number[]>();
+    gpkgIndex.forEach((entry, polygonIndex) => {
+      if (!boundsIntersect(entry.bbox, pointExtent)) return;
       const x0 = cell(entry.bbox[0], extent[0]), x1 = cell(entry.bbox[2], extent[0]), y0 = cell(entry.bbox[1], extent[1]), y1 = cell(entry.bbox[3], extent[1]);
-      if ((x1 - x0 + 1) * (y1 - y0 + 1) > 400) { oversized.push(index); return; }
-      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) { const key = `${x}:${y}`, list = grid.get(key) ?? []; list.push(index); grid.set(key, list); }
-    });
-    const statement = gpkgDb.prepare(`SELECT ${sqlQuote(gpkgGeometryColumn)} AS geometry FROM ${sqlQuote(gpkgTable)} WHERE ${sqlQuote(gpkgPrimaryKey)} = ?`);
-    const cache = new Map<string, number[][][][]>();
-    points.forEach((point, index) => {
-      const candidateIndexes = [...(grid.get(`${cell(point.lng, extent[0])}:${cell(point.lat, extent[1])}`) ?? []), ...oversized];
-      const isInside = candidateIndexes.some((candidateIndex) => {
-        const entry = gpkgIndex[candidateIndex], [west, south, east, north] = entry.bbox;
-        if (point.lng < west || point.lng > east || point.lat < south || point.lat > north) return false;
-        let geometry = cache.get(entry.id);
-        if (!geometry) {
-          statement.bind([entry.id]);
-          if (statement.step()) {
-            const blob = statement.getAsObject().geometry;
-            geometry = blob instanceof Uint8Array ? parseGeoPackageBinary(blob) ?? undefined : undefined;
-          }
-          statement.reset();
-          if (geometry) {
-            if (cache.size >= 1500) cache.delete(cache.keys().next().value!);
-            cache.set(entry.id, geometry);
-          }
+      const matches: number[] = [];
+      if ((x1 - x0 + 1) * (y1 - y0 + 1) > 400) {
+        points.forEach((point, pointIndex) => {
+          if (point.lng >= entry.bbox[0] && point.lng <= entry.bbox[2] && point.lat >= entry.bbox[1] && point.lat <= entry.bbox[3]) matches.push(pointIndex);
+        });
+      } else {
+        for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+          const bucket = pointGrid.get(`${x}:${y}`);
+          if (!bucket) continue;
+          bucket.forEach((pointIndex) => {
+            const point = points[pointIndex];
+            if (point.lng >= entry.bbox[0] && point.lng <= entry.bbox[2] && point.lat >= entry.bbox[1] && point.lat <= entry.bbox[3]) matches.push(pointIndex);
+          });
         }
-        return Boolean(geometry && pointInGeometry(point.lng, point.lat, geometry));
-      });
-      point.coverage = isInside ? "Dentro" : "Fuera"; point.attributes.DENTRO_POLIGONO = point.coverage;
-      worksheetSet(pointSheet!, point.rowIndex, coverageColumn.sourceIndex, point.coverage); if (isInside) inside++;
-      if ((index + 1) % 5000 === 0) progress(`Evaluando cobertura… ${(index + 1).toLocaleString()} de ${points.length.toLocaleString()}`);
+      }
+      if (matches.length) candidatePoints.set(entry.id, matches);
+      if ((polygonIndex + 1) % 100000 === 0) progress(`Localizando cobertura… ${(polygonIndex + 1).toLocaleString()} de ${gpkgIndex.length.toLocaleString()} polígonos`);
     });
-    statement.free();
+
+    const insideFlags = new Uint8Array(points.length);
+    const candidateEntries = [...candidatePoints.entries()];
+    const batchSize = 350;
+    for (let start = 0; start < candidateEntries.length; start += batchSize) {
+      const batch = candidateEntries.slice(start, start + batchSize);
+      const ids = batch.map(([id]) => id), placeholders = ids.map(() => "?").join(",");
+      const statement = gpkgDb.prepare(`SELECT ${sqlQuote(gpkgPrimaryKey)} AS feature_id, ${sqlQuote(gpkgGeometryColumn)} AS geometry FROM ${sqlQuote(gpkgTable)} WHERE ${sqlQuote(gpkgPrimaryKey)} IN (${placeholders})`);
+      statement.bind(ids);
+      while (statement.step()) {
+        const row = statement.getAsObject(), pointIndexes = candidatePoints.get(String(row.feature_id));
+        const geometry = row.geometry instanceof Uint8Array ? parseGeoPackageBinary(row.geometry) : null;
+        if (!geometry || !pointIndexes) continue;
+        pointIndexes.forEach((pointIndex) => {
+          if (insideFlags[pointIndex]) return;
+          const point = points[pointIndex];
+          if (pointInGeometry(point.lng, point.lat, geometry)) insideFlags[pointIndex] = 1;
+        });
+      }
+      statement.free();
+      progress(`Validando geometrías… ${Math.min(start + batch.length, candidateEntries.length).toLocaleString()} de ${candidateEntries.length.toLocaleString()}`);
+    }
+
+    points.forEach((point, index) => {
+      const isInside = insideFlags[index] === 1;
+      point.coverage = isInside ? "Dentro" : "Fuera";
+      point.attributes.DENTRO_POLIGONO = point.coverage;
+      worksheetSet(pointSheet!, point.rowIndex, coverageColumn.sourceIndex, point.coverage);
+      if (isInside) inside++;
+    });
   } else {
     const extent = polygonExtent!;
     const area = Math.max(0.0001, (extent[2] - extent[0]) * (extent[3] - extent[1]));
@@ -222,8 +253,18 @@ function sqlCell(value: unknown): CellValue {
 
 async function loadPoints(buffer: ArrayBuffer, name: string) {
   progress("Reconociendo columnas y coordenadas…");
-  const workbook = parseWorkbook(buffer), sheetName = workbook.SheetNames[0], rows = sheetRows(workbook, sheetName);
-  const headerRow = findHeaderRow(rows, true), headers = uniqueHeaders(rows[headerRow] ?? []), coordinateColumns = findCoordinateColumns(headers);
+  const workbook = parseWorkbook(buffer);
+  let selected: { sheetName: string; rows: unknown[][]; headerRow: number; headers: string[]; coordinates: { latitude?: number; longitude?: number } } | null = null;
+  for (const sheetName of workbook.SheetNames) {
+    const rows = sheetRows(workbook, sheetName);
+    try {
+      const headerRow = findHeaderRow(rows, true), headers = uniqueHeaders(rows[headerRow] ?? []), coordinates = findCoordinateColumns(headers);
+      selected = { sheetName, rows, headerRow, headers, coordinates };
+      break;
+    } catch { /* Continue until finding the sheet that contains the coordinate columns. */ }
+  }
+  if (!selected) throw new Error("No se encontraron las columnas LATITUD y LONGITUD en ninguna hoja. Son las únicas columnas obligatorias.");
+  const { sheetName, rows, headerRow, headers, coordinates: coordinateColumns } = selected;
   const dataRows = rows.slice(headerRow + 1), columns = buildColumns(headers, dataRows);
   const latitudeIndex = coordinateColumns.latitude!, longitudeIndex = coordinateColumns.longitude!;
   columns[latitudeIndex].kind = "number"; columns[longitudeIndex].kind = "number";

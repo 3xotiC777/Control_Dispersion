@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findCoordinateColumns, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry } from "../app/explorer-core";
+import { findCoordinateColumns, geoPackageEnvelope, inferColumnKind, matchesRule, parseGeoPackageBinary, parseWktGeometry, pointInGeometry, sampleExplorerPoints, type ExplorerPoint } from "../app/explorer-core";
 
 test("detecta latitud y longitud por nombre aunque cambie su posición", () => {
   assert.deepEqual(findCoordinateColumns(["PDV", "Longitud", "Ciudad", "LATITUD"]), { latitude: 3, longitude: 1 });
@@ -16,6 +16,16 @@ test("acepta varios valores seleccionados de una misma columna", () => {
   const rule = { id: "multi", column: "CANAL", operator: "eq" as const, value: "", mode: "values" as const, selectedValues: ["Tradicional", "Mayorista"] };
   assert.equal(matchesRule({ CANAL: "Mayorista" }, rule), true);
   assert.equal(matchesRule({ CANAL: "Moderno" }, rule), false);
+});
+
+test("mantiene todos los puntos fuera de cobertura en una vista muestreada", () => {
+  const points: ExplorerPoint[] = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index), rowIndex: index, lat: index, lng: index,
+    attributes: { GRUPO: index % 2 ? "A" : "B" }, coverage: index === 3 || index === 17 ? "Fuera" : "Dentro",
+  }));
+  const sample = sampleExplorerPoints(points, "GRUPO", 8);
+  assert.equal(sample.length, 8);
+  assert.deepEqual(sample.filter((point) => point.coverage === "Fuera").map((point) => point.id).sort(), ["17", "3"]);
 });
 
 test("interpreta Polygon WKT con huecos", () => {

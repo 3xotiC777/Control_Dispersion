@@ -92,6 +92,40 @@ export function matchesRule(attributes: Record<string, CellValue>, rule: FilterR
   return a === b;
 }
 
+export function sampleExplorerPoints(points: ExplorerPoint[], groupColumn: string, limit = 4500): ExplorerPoint[] {
+  if (points.length <= limit) return points;
+  const outside = points.filter((point) => point.coverage === "Fuera");
+  if (outside.length >= limit) {
+    const stride = outside.length / limit;
+    return Array.from({ length: limit }, (_, index) => outside[Math.floor(index * stride)]);
+  }
+  const outsideIds = new Set(outside.map((point) => point.id));
+  const available = points.filter((point) => !outsideIds.has(point.id));
+  const remaining = limit - outside.length;
+  const buckets = new Map<string, ExplorerPoint[]>();
+  available.forEach((point) => {
+    const key = String(point.attributes[groupColumn] ?? ""), bucket = buckets.get(key) ?? [];
+    bucket.push(point);
+    buckets.set(key, bucket);
+  });
+  const result: ExplorerPoint[] = [...outside];
+  buckets.forEach((bucket) => {
+    const quota = Math.max(1, Math.floor(remaining * bucket.length / available.length)), stride = bucket.length / quota;
+    for (let index = 0; index < quota && result.length < limit; index++) result.push(bucket[Math.floor(index * stride)]);
+  });
+  if (result.length < limit) {
+    const selectedIds = new Set(result.map((point) => point.id));
+    for (let index = 0; index < available.length && result.length < limit; index++) {
+      const candidate = available[index];
+      if (candidate && !selectedIds.has(candidate.id)) {
+        result.push(candidate);
+        selectedIds.add(candidate.id);
+      }
+    }
+  }
+  return result;
+}
+
 function splitTopLevel(value: string): string[] {
   const chunks: string[] = [];
   let depth = 0, start = 0;
