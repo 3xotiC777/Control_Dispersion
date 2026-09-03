@@ -10,7 +10,7 @@ importers:
     dependencies:
       drizzle-orm:
         specifier: 0.45.2
-        version: 0.45.2
+        version: 0.45.2(@types/sql.js@1.4.11)(sql.js@1.14.2)
       leaflet:
         specifier: ^1.9.4
         version: 1.9.4
@@ -29,6 +29,9 @@ importers:
       react-loading-skeleton:
         specifier: 3.5.0
         version: 3.5.0(react@19.2.6)
+      sql.js:
+        specifier: 1.14.2
+        version: 1.14.2
       xlsx:
         specifier: ^0.18.5
         version: 0.18.5
@@ -57,6 +60,9 @@ importers:
       '@types/react-dom':
         specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.14)
+      '@types/sql.js':
+        specifier: 1.4.11
+        version: 1.4.11
       '@vitejs/plugin-react':
         specifier: 6.0.2
         version: 6.0.2(vite@8.0.13(@types/node@22.19.19)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.49.0)(tsx@4.23.1))
@@ -1338,6 +1344,9 @@ packages:
   '@tybys/wasm-util@0.10.3':
     resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
+  '@types/emscripten@1.41.6':
+    resolution: {integrity: sha512-uN+9i8bFT5CUcZfyIEYDrSueACEyKGbUs5kC/72DGlZZoinh84sJfVV0i8UOJD1asdzkvLPBRrKs41kZ8MdEXg==}
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
@@ -1360,6 +1369,9 @@ packages:
 
   '@types/react@19.2.14':
     resolution: {integrity: sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==}
+
+  '@types/sql.js@1.4.11':
+    resolution: {integrity: sha512-QXIx38p2ZThJaK9vP5ZdqdlRe1FG9I8SmCZOS7FHfB/2qPAjZwkL7/vlfPg6N/oWHuuOaGg/P/IRwfP2W0kWVQ==}
 
   '@typescript-eslint/eslint-plugin@8.59.3':
     resolution: {integrity: sha512-PwFvSKsXGShKGW6n5bZOhGHEcCZXM8HofLK9fNsEwZXzFRjoY+XT1Vsf1zgyXdwTr0ZYz1/2tkZ0DBTT9jZjhw==}
@@ -2016,6 +2028,7 @@ packages:
   eslint@9.39.4:
     resolution: {integrity: sha512-XoMjdBOwe/esVgEvLmNsD3IRHkm7fbKIUGvrleloJXUZgDHig2IPWNniv+GwjyJXzuNqVjlr5+4yVUZjycJwfQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -2956,6 +2969,9 @@ packages:
   source-map@0.6.1:
     resolution: {integrity: sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==}
     engines: {node: '>=0.10.0'}
+
+  sql.js@1.14.2:
+    resolution: {integrity: sha512-3ZGPovObMFrdw79zrUHbfdE/DLIsy8jdNdssmMSQuRAymedU6q84asPt0kgiqrdMYlPegDItiIMfmIXzZnYFcw==}
 
   srvx@0.11.22:
     resolution: {integrity: sha512-LqZxxBDMKuMAZzFzJnDCkFOrs9MZQZr0LvHiO/SuSZVdQaXD7xQ5UWTUxheJrQPve1qk9MG2B/yttUvJxw8egQ==}
@@ -4153,6 +4169,8 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
+  '@types/emscripten@1.41.6': {}
+
   '@types/estree@1.0.9': {}
 
   '@types/geojson@7946.0.16': {}
@@ -4174,6 +4192,11 @@ snapshots:
   '@types/react@19.2.14':
     dependencies:
       csstype: 3.2.3
+
+  '@types/sql.js@1.4.11':
+    dependencies:
+      '@types/emscripten': 1.41.6
+      '@types/node': 22.19.19
 
   '@typescript-eslint/eslint-plugin@8.59.3(@typescript-eslint/parser@8.59.3(eslint@9.39.4(jiti@2.7.0)(supports-color@10.2.2))(supports-color@10.2.2)(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)(supports-color@10.2.2))(supports-color@10.2.2)(typescript@5.9.3)':
     dependencies:
@@ -4661,7 +4684,10 @@ snapshots:
       esbuild: 0.25.12
       tsx: 4.23.1
 
-  drizzle-orm@0.45.2: {}
+  drizzle-orm@0.45.2(@types/sql.js@1.4.11)(sql.js@1.14.2):
+    optionalDependencies:
+      '@types/sql.js': 1.4.11
+      sql.js: 1.14.2
 
   dunder-proto@1.0.1:
     dependencies:
@@ -5942,6 +5968,8 @@ snapshots:
       source-map: 0.6.1
 
   source-map@0.6.1: {}
+
+  sql.js@1.14.2: {}
 
   srvx@0.11.22: {}
 

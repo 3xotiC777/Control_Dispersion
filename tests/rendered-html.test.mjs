@@ -25,6 +25,7 @@ test("renderiza la aplicación Ruta Compacta", async () => {
   assert.match(html, /Base de puntos/);
   assert.match(html, /Forecast mensual/);
   assert.match(html, /Calcular planificación/);
+  assert.match(html, /Cargar puntos y polígonos/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
