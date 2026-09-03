@@ -100,6 +100,7 @@ export default function DataExplorer() {
   const [filters, setFilters] = useState<FilterRule[]>([]), [filterColumn, setFilterColumn] = useState("");
   const [openValuePicker, setOpenValuePicker] = useState<string | null>(null), [valueSearches, setValueSearches] = useState<Record<string, string>>({});
   const [groupColumn, setGroupColumn] = useState(""), [multiSelect, setMultiSelect] = useState(false);
+  const [coverageFilter, setCoverageFilter] = useState<"Dentro" | "Fuera" | null>(null);
   const [selectedPointIds, setSelectedPointIds] = useState<Set<string>>(new Set()), [selectedPolygonIds, setSelectedPolygonIds] = useState<Set<string>>(new Set());
   const [editColumn, setEditColumn] = useState(""), [editValue, setEditValue] = useState("");
   const [newColumnName, setNewColumnName] = useState(""), [newColumnKind, setNewColumnKind] = useState<ColumnKind>("text"), [newColumnValue, setNewColumnValue] = useState("");
@@ -148,7 +149,7 @@ export default function DataExplorer() {
       const result = await workerCall("load-points", { buffer, name: file.name }, [buffer]) as { name: string; count: number; skipped: number; columns: ColumnMeta[]; points: ExplorerPoint[]; extent: Bounds };
       setPointInfo({ name: result.name, count: result.count, skipped: result.skipped }); setPointColumns(result.columns); setPoints(result.points); setPointExtent(result.extent);
       const preferred = result.columns.find((column) => normalizeHeader(column.name) === "DIA") ?? result.columns.find((column) => normalizeHeader(column.name) === "MT FINAL") ?? result.columns[0];
-      setGroupColumn(preferred?.name ?? ""); setFilterColumn(preferred?.name ?? ""); setFilters([]); setSelectedPointIds(new Set()); setDataVersion((value) => value + 1);
+      setGroupColumn(preferred?.name ?? ""); setFilterColumn(preferred?.name ?? ""); setFilters([]); setCoverageFilter(null); setSelectedPointIds(new Set()); setDataVersion((value) => value + 1);
       if (polygonInfo) {
         const coverage = await workerCall("classify") as { inside: number; outside: number; points: ExplorerPoint[] };
         setPoints(coverage.points); setPointColumns((current) => current.some((column) => column.name === "DENTRO_POLIGONO") ? current : [...current, { name: "DENTRO_POLIGONO", kind: "text", sourceIndex: current.length }]);
@@ -165,7 +166,7 @@ export default function DataExplorer() {
       const buffer = await file.arrayBuffer();
       const result = await workerCall("load-polygons", { buffer, name: file.name }, [buffer]) as { name: string; count: number; columns: ColumnMeta[]; extent: Bounds; sourceType: "excel" | "gpkg"; sheetName?: string; layerName?: string; view: { polygons: ExplorerPolygon[]; totalInView: number; limited: boolean } };
       setPolygonInfo({ name: result.name, count: result.count, sourceType: result.sourceType, sheetName: result.sheetName, layerName: result.layerName }); setPolygonColumns(result.columns); setPolygonExtent(result.extent);
-      setPolygonView(result.view.polygons); setPolygonViewMeta({ total: result.view.totalInView, limited: result.view.limited }); setSelectedPolygonIds(new Set()); setDataVersion((value) => value + 1);
+      setPolygonView(result.view.polygons); setPolygonViewMeta({ total: result.view.totalInView, limited: result.view.limited }); setCoverageFilter(null); setSelectedPolygonIds(new Set()); setDataVersion((value) => value + 1);
       if (!pointInfo) {
         const preferred = result.columns.find((column) => /CLASIFIC|ZONA|TIPO/.test(normalizeHeader(column.name))) ?? result.columns[0];
         setGroupColumn(preferred?.name ?? ""); setFilterColumn(preferred?.name ?? ""); setFilters([]);
@@ -182,13 +183,14 @@ export default function DataExplorer() {
   const activeIsPoints = points.length > 0;
   const appliedFilters = useMemo(() => filters.filter((rule) => rule.mode === "values" ? Boolean(rule.selectedValues?.length) : ["empty", "not-empty"].includes(rule.operator) || rule.value.trim()), [filters]);
   const deferredFilters = useDeferredValue(appliedFilters);
-  const filteredPoints = useMemo(() => points.filter((point) => deferredFilters.every((rule) => matchesRule(point.attributes, rule))), [points, deferredFilters]);
+  const attributeFilteredPoints = useMemo(() => points.filter((point) => deferredFilters.every((rule) => matchesRule(point.attributes, rule))), [points, deferredFilters]);
+  const filteredPoints = useMemo(() => coverageFilter ? attributeFilteredPoints.filter((point) => point.coverage === coverageFilter) : attributeFilteredPoints, [attributeFilteredPoints, coverageFilter]);
   const filteredPolygons = useMemo(() => activeIsPoints ? polygonView : polygonView.filter((polygon) => deferredFilters.every((rule) => matchesRule(polygon.attributes, rule))), [activeIsPoints, polygonView, deferredFilters]);
-  const coverageSummary = useMemo(() => filteredPoints.reduce((summary, point) => {
+  const coverageSummary = useMemo(() => attributeFilteredPoints.reduce((summary, point) => {
     if (point.coverage === "Dentro") summary.inside++;
     else if (point.coverage === "Fuera") summary.outside++;
     return summary;
-  }, { inside: 0, outside: 0 }), [filteredPoints]);
+  }, { inside: 0, outside: 0 }), [attributeFilteredPoints]);
   const coverageReady = coverageSummary.inside + coverageSummary.outside > 0;
   const valueModeColumnsKey = [...new Set(filters.filter((rule) => rule.mode === "values").map((rule) => rule.column))].sort().join("\u0000");
   const filterValuesByColumn = useMemo(() => {
@@ -338,7 +340,11 @@ export default function DataExplorer() {
       </aside>
       <section className="explorer-canvas">
         <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
-        {coverageReady && <div className="coverage-summary" aria-label="Resumen de cobertura de los puntos filtrados"><span className="inside"><i /> Dentro <b>{coverageSummary.inside.toLocaleString()}</b></span><span className="outside"><i /> Fuera <b>{coverageSummary.outside.toLocaleString()}</b></span><small>El color central conserva la agrupación; el contorno indica la cobertura.</small></div>}
+        {coverageReady && <div className="coverage-summary" aria-label="Filtros rápidos de cobertura">
+          <button type="button" className={`inside${coverageFilter === "Dentro" ? " active" : ""}`} aria-pressed={coverageFilter === "Dentro"} onClick={() => setCoverageFilter((current) => current === "Dentro" ? null : "Dentro")}><i /> Dentro <b>{coverageSummary.inside.toLocaleString()}</b></button>
+          <button type="button" className={`outside${coverageFilter === "Fuera" ? " active" : ""}`} aria-pressed={coverageFilter === "Fuera"} onClick={() => setCoverageFilter((current) => current === "Fuera" ? null : "Fuera")}><i /> Fuera <b>{coverageSummary.outside.toLocaleString()}</b></button>
+          <small>{coverageFilter ? `Mostrando solo puntos ${coverageFilter.toLocaleLowerCase()}. Pulsa de nuevo para ver todos.` : "El color central conserva la agrupación; el contorno indica la cobertura."}</small>
+        </div>}
         {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. La selección múltiple actúa sobre los puntos visibles; usa filtros si necesitas reducir el universo.</p>}
         {polygonViewMeta.limited && <p className="polygon-performance-note">Vista general optimizada: la cobertura exacta se muestra en el contorno verde o rojo de cada punto. Acércate para dibujar los polígonos individuales sin saturar el mapa.</p>}
         {multiSelect && <p className="map-selection-help"><BoxSelect size={15} /> {activeIsPoints ? "Arrastra un rectángulo sobre los puntos que deseas editar." : "Haz clic en varios polígonos para agregarlos o quitarlos de la selección."}</p>}
