@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { type ChangeEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, Plus, Save, Shapes, Trash2, X } from "lucide-react";
+import { BoxSelect, Check, ChevronDown, Columns3, Download, FileSpreadsheet, Filter, Layers3, LoaderCircle, MapPinned, Palette, Plus, Save, Search, Shapes, Trash2, X } from "lucide-react";
 import { EXPLORER_COLORS, matchesRule, normalizeHeader, type CellValue, type ColumnKind, type ColumnMeta, type ExplorerPoint, type ExplorerPolygon, type FilterOperator, type FilterRule } from "./explorer-core";
 
 const ExplorerMap = dynamic(() => import("./ExplorerMap"), { ssr: false });
@@ -49,6 +49,56 @@ const numericOperators: { value: FilterOperator; label: string }[] = [
   { value: "between", label: "Entre" }, { value: "empty", label: "Está vacío" }, { value: "not-empty", label: "No está vacío" },
 ];
 
+function FilterRuleCard({ rule, column, values, pickerOpen, search, onSearch, onTogglePicker, onUpdate, onRemove }: {
+  rule: FilterRule;
+  column?: ColumnMeta;
+  values: string[];
+  pickerOpen: boolean;
+  search: string;
+  onSearch: (value: string) => void;
+  onTogglePicker: () => void;
+  onUpdate: (patch: Partial<FilterRule>) => void;
+  onRemove: () => void;
+}) {
+  const operators = column?.kind === "number" ? numericOperators : textOperators;
+  const mode = rule.mode ?? "condition", selected = useMemo(() => new Set(rule.selectedValues ?? []), [rule.selectedValues]);
+  const matchingValues = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return (query ? values.filter((value) => displayValue(value).toLocaleLowerCase().includes(query)) : values).slice(0, 250);
+  }, [search, values]);
+  const allVisibleSelected = matchingValues.length > 0 && matchingValues.every((value) => selected.has(value));
+  const toggleValue = (value: string) => {
+    const next = new Set(selected); if (next.has(value)) next.delete(value); else next.add(value);
+    onUpdate({ selectedValues: [...next] });
+  };
+  const toggleVisible = () => {
+    const next = new Set(selected);
+    matchingValues.forEach((value) => { if (allVisibleSelected) next.delete(value); else next.add(value); });
+    onUpdate({ selectedValues: [...next] });
+  };
+
+  return <div className="filter-rule">
+    <div className="filter-rule-heading"><b>{rule.column}</b><button aria-label={`Quitar filtro ${rule.column}`} onClick={onRemove}><X size={14} /></button></div>
+    <div className="filter-mode-toggle" role="group" aria-label={`Forma de filtrar ${rule.column}`}>
+      <button className={mode === "condition" ? "active" : ""} onClick={() => onUpdate({ mode: "condition" })}>Escribir</button>
+      <button className={mode === "values" ? "active" : ""} onClick={() => onUpdate({ mode: "values" })}>Seleccionar valores</button>
+    </div>
+    {mode === "condition" ? <>
+      <select aria-label={`Operador para ${rule.column}`} value={rule.operator} onChange={(event) => onUpdate({ operator: event.target.value as FilterOperator })}>{operators.map((operator) => <option value={operator.value} key={operator.value}>{operator.label}</option>)}</select>
+      {!['empty', 'not-empty'].includes(rule.operator) && <input aria-label={`Valor para ${rule.column}`} type={column?.kind === "number" ? "number" : "text"} value={rule.value} placeholder="Escribe un valor" onChange={(event) => onUpdate({ value: event.target.value })} />}
+      {rule.operator === "between" && <input aria-label={`Valor máximo para ${rule.column}`} type="number" value={rule.value2 ?? ""} placeholder="Valor máximo" onChange={(event) => onUpdate({ value2: event.target.value })} />}
+    </> : <div className="filter-value-picker">
+      <button className="filter-picker-trigger" type="button" aria-expanded={pickerOpen} onClick={onTogglePicker}><span>{selected.size ? `${selected.size} seleccionado${selected.size === 1 ? "" : "s"}` : "Seleccionar valores"}</span><ChevronDown size={15} /></button>
+      {pickerOpen && <div className="filter-values-panel">
+        <label className="filter-values-search"><Search size={14} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Buscar en la columna" aria-label={`Buscar valores de ${rule.column}`} /></label>
+        <div className="filter-values-actions"><button onClick={toggleVisible}>{allVisibleSelected ? "Quitar visibles" : "Seleccionar visibles"}</button><button onClick={() => onUpdate({ selectedValues: [] })}>Limpiar</button></div>
+        <div className="filter-values-list">{matchingValues.map((value) => <label key={value || "__empty__"}><input type="checkbox" checked={selected.has(value)} onChange={() => toggleValue(value)} /><span>{displayValue(value)}</span></label>)}{!matchingValues.length && <p>No hay coincidencias.</p>}</div>
+        {values.length > 250 && !search.trim() && <small>Se muestran 250 valores. Usa el buscador para encontrar los demás.</small>}
+      </div>}
+    </div>}
+  </div>;
+}
+
 function downloadBuffer(buffer: ArrayBuffer, name: string, mime: string) {
   const url = URL.createObjectURL(new Blob([buffer], { type: mime }));
   const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click();
@@ -63,6 +113,7 @@ export default function DataExplorer() {
   const [pointExtent, setPointExtent] = useState<Bounds | null>(null), [polygonExtent, setPolygonExtent] = useState<Bounds | null>(null);
   const [polygonViewMeta, setPolygonViewMeta] = useState({ total: 0, limited: false });
   const [filters, setFilters] = useState<FilterRule[]>([]), [filterColumn, setFilterColumn] = useState("");
+  const [openValuePicker, setOpenValuePicker] = useState<string | null>(null), [valueSearches, setValueSearches] = useState<Record<string, string>>({});
   const [groupColumn, setGroupColumn] = useState(""), [multiSelect, setMultiSelect] = useState(false);
   const [selectedPointIds, setSelectedPointIds] = useState<Set<string>>(new Set()), [selectedPolygonIds, setSelectedPolygonIds] = useState<Set<string>>(new Set());
   const [editColumn, setEditColumn] = useState(""), [editValue, setEditValue] = useState("");
@@ -140,10 +191,20 @@ export default function DataExplorer() {
 
   const activeColumns = points.length ? pointColumns : polygonColumns;
   const activeIsPoints = points.length > 0;
-  const appliedFilters = useMemo(() => filters.filter((rule) => ["empty", "not-empty"].includes(rule.operator) || rule.value.trim()), [filters]);
+  const appliedFilters = useMemo(() => filters.filter((rule) => rule.mode === "values" ? Boolean(rule.selectedValues?.length) : ["empty", "not-empty"].includes(rule.operator) || rule.value.trim()), [filters]);
   const deferredFilters = useDeferredValue(appliedFilters);
   const filteredPoints = useMemo(() => points.filter((point) => deferredFilters.every((rule) => matchesRule(point.attributes, rule))), [points, deferredFilters]);
   const filteredPolygons = useMemo(() => activeIsPoints ? polygonView : polygonView.filter((polygon) => deferredFilters.every((rule) => matchesRule(polygon.attributes, rule))), [activeIsPoints, polygonView, deferredFilters]);
+  const valueModeColumnsKey = [...new Set(filters.filter((rule) => rule.mode === "values").map((rule) => rule.column))].sort().join("\u0000");
+  const filterValuesByColumn = useMemo(() => {
+    const columnNames = valueModeColumnsKey ? valueModeColumnsKey.split("\u0000") : [], result = new Map<string, string[]>();
+    if (!columnNames.length) return result;
+    const sets = new Map(columnNames.map((name) => [name, new Set<string>()]));
+    const source = activeIsPoints ? points : polygonView;
+    source.forEach((feature) => columnNames.forEach((name) => sets.get(name)!.add(String(feature.attributes[name] ?? ""))));
+    sets.forEach((values, name) => result.set(name, [...values].sort((a, b) => displayValue(a).localeCompare(displayValue(b), undefined, { numeric: true }))));
+    return result;
+  }, [activeIsPoints, points, polygonView, valueModeColumnsKey]);
   const mapPoints = useMemo(() => samplePoints(filteredPoints, groupColumn), [filteredPoints, groupColumn]);
   const mapLimited = filteredPoints.length > mapPoints.length;
   const groupLegend = useMemo(() => {
@@ -160,7 +221,7 @@ export default function DataExplorer() {
 
   const addFilter = () => {
     const column = activeColumns.find((candidate) => candidate.name === filterColumn); if (!column) return;
-    setFilters((current) => [...current, { id: crypto.randomUUID(), column: column.name, operator: column.kind === "number" ? "gte" : "eq", value: "" }]);
+    setFilters((current) => [...current, { id: crypto.randomUUID(), column: column.name, operator: column.kind === "number" ? "gte" : "eq", value: "", mode: "condition", selectedValues: [] }]);
   };
   const updateFilter = (id: string, patch: Partial<FilterRule>) => setFilters((current) => current.map((rule) => rule.id === id ? { ...rule, ...patch } : rule));
 
@@ -259,10 +320,18 @@ export default function DataExplorer() {
         <button className="rail-section-trigger" onClick={() => setOpenPanel(openPanel === "filters" ? null : "filters")}><span><Filter size={15} /> Escoger filtros</span><ChevronDown className={openPanel === "filters" ? "rotated" : ""} size={16} /></button>
         {openPanel === "filters" && <div className="rail-section-body">
           <div className="filter-builder"><select value={filterColumn} onChange={(event) => setFilterColumn(event.target.value)}><option value="">Selecciona una columna</option>{activeColumns.map((column) => <option key={column.name} value={column.name}>{column.name} · {column.kind === "number" ? "numérica" : "texto"}</option>)}</select><button onClick={addFilter} disabled={!filterColumn}><Plus size={15} /> Agregar filtro</button></div>
-          {filters.map((rule) => {
-            const column = activeColumns.find((candidate) => candidate.name === rule.column), operators = column?.kind === "number" ? numericOperators : textOperators;
-            return <div className="filter-rule" key={rule.id}><div><b>{rule.column}</b><button aria-label={`Quitar filtro ${rule.column}`} onClick={() => setFilters((current) => current.filter((candidate) => candidate.id !== rule.id))}><X size={14} /></button></div><select aria-label={`Operador para ${rule.column}`} value={rule.operator} onChange={(event) => updateFilter(rule.id, { operator: event.target.value as FilterOperator })}>{operators.map((operator) => <option value={operator.value} key={operator.value}>{operator.label}</option>)}</select>{!["empty", "not-empty"].includes(rule.operator) && <input aria-label={`Valor para ${rule.column}`} type={column?.kind === "number" ? "number" : "text"} value={rule.value} placeholder="Valor" onChange={(event) => updateFilter(rule.id, { value: event.target.value })} />}{rule.operator === "between" && <input aria-label={`Valor máximo para ${rule.column}`} type="number" value={rule.value2 ?? ""} placeholder="Valor máximo" onChange={(event) => updateFilter(rule.id, { value2: event.target.value })} />}</div>;
-          })}
+          {filters.map((rule) => <FilterRuleCard
+            key={rule.id}
+            rule={rule}
+            column={activeColumns.find((candidate) => candidate.name === rule.column)}
+            values={filterValuesByColumn.get(rule.column) ?? []}
+            pickerOpen={openValuePicker === rule.id}
+            search={valueSearches[rule.id] ?? ""}
+            onSearch={(value) => setValueSearches((current) => ({ ...current, [rule.id]: value }))}
+            onTogglePicker={() => setOpenValuePicker((current) => current === rule.id ? null : rule.id)}
+            onUpdate={(patch) => updateFilter(rule.id, patch)}
+            onRemove={() => { setFilters((current) => current.filter((candidate) => candidate.id !== rule.id)); setOpenValuePicker((current) => current === rule.id ? null : current); }}
+          />)}
           {!filters.length && <p className="rail-empty">Agrega uno o varios filtros. Todos se aplican al mismo tiempo.</p>}
           {!!filters.length && <button className="clear-filters" onClick={() => setFilters([])}><Trash2 size={14} /> Limpiar filtros</button>}
         </div>}
@@ -272,8 +341,8 @@ export default function DataExplorer() {
         {openPanel === "columns" && <div className="rail-section-body"><label className="rail-label"><span>Nueva columna</span><input value={newColumnName} placeholder="Ej. REVISADO" onChange={(event) => setNewColumnName(event.target.value)} /></label><div className="column-pair"><select value={newColumnKind} onChange={(event) => setNewColumnKind(event.target.value as ColumnKind)}><option value="text">Texto</option><option value="number">Número</option><option value="boolean">Sí / No</option></select><input value={newColumnValue} type={newColumnKind === "number" ? "number" : "text"} placeholder="Valor por defecto" onChange={(event) => setNewColumnValue(event.target.value)} /></div><button className="rail-primary" onClick={addColumn} disabled={!newColumnName.trim() || Boolean(busy)}><Plus size={15} /> Crear para todos</button>{polygonInfo && !pointInfo && <><div className="rail-divider" /><label className="rail-label"><span>Eliminar columna del polígono</span><select value={dropColumn} onChange={(event) => setDropColumn(event.target.value)}><option value="">Selecciona una columna</option>{polygonColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select></label><button className="rail-danger" onClick={removePolygonColumn} disabled={!dropColumn || Boolean(busy)}><Trash2 size={14} /> Eliminar columna</button></>}</div>}
       </aside>
       <section className="explorer-canvas">
-        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }} disabled={activeIsPoints && mapLimited}><BoxSelect size={16} /> Selección múltiple</button></div></div>
-        {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. Aplica filtros para activar la selección múltiple sobre todos los resultados.</p>}
+        <div className="explorer-map-heading"><div><span className="section-kicker"><MapPinned size={14} /> VISTA ESPACIAL</span><h2>{groupColumn ? `Color por ${groupColumn}` : "Mapa de datos"}</h2><p>{activeIsPoints ? `${filteredPoints.length.toLocaleString()} puntos después de filtros` : `${filteredPolygons.length.toLocaleString()} polígonos visibles`}</p></div><div className="explorer-map-actions"><button className={multiSelect ? "active" : ""} onClick={() => { setMultiSelect((value) => !value); clearSelection(); }}><BoxSelect size={16} /> Selección múltiple</button></div></div>
+        {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. La selección múltiple actúa sobre los puntos visibles; usa filtros si necesitas reducir el universo.</p>}
         {polygonViewMeta.limited && <p className="polygon-performance-note">Se dibujan {polygonView.length.toLocaleString()} de {polygonViewMeta.total.toLocaleString()} polígonos en esta vista. Acércate para ver el detalle completo.</p>}
         {multiSelect && <p className="map-selection-help"><BoxSelect size={15} /> {activeIsPoints ? "Arrastra un rectángulo sobre los puntos que deseas editar." : "Haz clic en varios polígonos para agregarlos o quitarlos de la selección."}</p>}
         <ExplorerMap points={mapPoints} polygons={filteredPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />

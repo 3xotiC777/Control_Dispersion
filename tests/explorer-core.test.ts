@@ -12,6 +12,12 @@ test("infiere columnas numéricas y aplica rangos", () => {
   assert.equal(matchesRule({ VENTAS: 24 }, { id: "2", column: "VENTAS", operator: "lt", value: "20" }), false);
 });
 
+test("acepta varios valores seleccionados de una misma columna", () => {
+  const rule = { id: "multi", column: "CANAL", operator: "eq" as const, value: "", mode: "values" as const, selectedValues: ["Tradicional", "Mayorista"] };
+  assert.equal(matchesRule({ CANAL: "Mayorista" }, rule), true);
+  assert.equal(matchesRule({ CANAL: "Moderno" }, rule), false);
+});
+
 test("interpreta Polygon WKT con huecos", () => {
   const geometry = parseWktGeometry("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (4 4, 6 4, 6 6, 4 6, 4 4))");
   assert.ok(geometry);

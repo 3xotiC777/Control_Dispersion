@@ -32,6 +32,8 @@ export type FilterRule = {
   operator: FilterOperator;
   value: string;
   value2?: string;
+  mode?: "condition" | "values";
+  selectedValues?: string[];
 };
 
 export const EXPLORER_COLORS = [
@@ -66,6 +68,10 @@ export function inferColumnKind(values: CellValue[]): ColumnKind {
 
 export function matchesRule(attributes: Record<string, CellValue>, rule: FilterRule): boolean {
   const raw = attributes[rule.column];
+  if (rule.mode === "values") {
+    const selected = rule.selectedValues ?? [];
+    return !selected.length || selected.includes(String(raw ?? ""));
+  }
   if (rule.operator === "empty") return raw == null || String(raw).trim() === "";
   if (rule.operator === "not-empty") return raw != null && String(raw).trim() !== "";
   const left = String(raw ?? "").trim();
