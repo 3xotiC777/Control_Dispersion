@@ -213,6 +213,19 @@ export default function DataExplorer() {
   const mapPoints = useMemo(() => sampleExplorerPoints(filteredPoints, groupColumn), [filteredPoints, groupColumn]);
   const mapLimited = filteredPoints.length > mapPoints.length;
   const mapPolygons = activeIsPoints && polygonViewMeta.limited ? [] : filteredPolygons;
+  const mapFocusKey = useMemo(() => JSON.stringify({
+    dataVersion,
+    target: activeIsPoints ? "points" : "polygons",
+    coverageFilter,
+    filters: deferredFilters.map((rule) => ({
+      column: rule.column,
+      mode: rule.mode ?? "condition",
+      operator: rule.operator,
+      value: rule.value,
+      value2: rule.value2 ?? "",
+      selectedValues: [...(rule.selectedValues ?? [])].sort(),
+    })),
+  }), [activeIsPoints, coverageFilter, dataVersion, deferredFilters]);
   const groupLegend = useMemo(() => {
     const values = new Set<string>();
     if (activeIsPoints) mapPoints.forEach((point) => values.add(displayValue(point.attributes[groupColumn])));
@@ -397,7 +410,7 @@ export default function DataExplorer() {
         {mapLimited && <p className="map-performance-note">Vista rápida: se muestran {mapPoints.length.toLocaleString()} de {filteredPoints.length.toLocaleString()} puntos. La selección múltiple actúa sobre los puntos visibles; usa filtros si necesitas reducir el universo.</p>}
         {polygonViewMeta.limited && <p className="polygon-performance-note">Vista general optimizada: la cobertura exacta se muestra en el contorno verde o rojo de cada punto. Acércate para dibujar los polígonos individuales sin saturar el mapa.</p>}
         {multiSelect && <p className="map-selection-help"><BoxSelect size={15} /> {activeIsPoints ? "Arrastra un rectángulo sobre los puntos que deseas editar." : "Haz clic en varios polígonos para agregarlos o quitarlos de la selección."}</p>}
-        <ExplorerMap points={mapPoints} polygons={mapPolygons} drawnPolygons={drawnPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} drawMode={drawMode} activeDrawnPolygonId={activeDrawnPolygonId} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onDrawComplete={finishDrawing} onDrawnPolygonClick={(polygon) => { setActiveDrawnPolygonId(polygon.id); setOpenPanel("draw"); }} onCancelDraw={() => setDrawMode(null)} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} />
+        <ExplorerMap points={mapPoints} polygons={mapPolygons} drawnPolygons={drawnPolygons} pointColor={pointColor} polygonColor={polygonColor} selectedPointIds={selectedPointIds} selectedPolygonIds={selectedPolygonIds} multiSelect={multiSelect} drawMode={drawMode} activeDrawnPolygonId={activeDrawnPolygonId} onPointClick={selectPoint} onPolygonClick={selectPolygon} onMultiSelect={selectMultiplePoints} onDrawComplete={finishDrawing} onDrawnPolygonClick={(polygon) => { setActiveDrawnPolygonId(polygon.id); setOpenPanel("draw"); }} onCancelDraw={() => setDrawMode(null)} onBoundsChange={handleBoundsChange} extent={initialExtent} extentKey={`${dataVersion}-${pointInfo?.name ?? ""}-${polygonInfo?.name ?? ""}`} focusKey={mapFocusKey} focusTarget={activeIsPoints ? "points" : "polygons"} />
         <div className="explorer-legend"><span>Agrupado por <b>{groupColumn || "sin agrupación"}</b></span><div>{groupLegend.map((value) => <i key={value}><em style={{ background: colorFor(value) }} />{value}</i>)}{groupLegend.length >= 40 && <i>+ más valores</i>}</div></div>
       </section>
     </div>}

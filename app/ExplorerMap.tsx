@@ -41,6 +41,30 @@ function FitInitialExtent({ extent, extentKey }: { extent: Bounds | null; extent
   return null;
 }
 
+function FitFilteredFeatures({ points, polygons, focusKey, focusTarget }: {
+  points: ExplorerPoint[];
+  polygons: ExplorerPolygon[];
+  focusKey: string;
+  focusTarget: "points" | "polygons";
+}) {
+  const map = useMap(), previous = useRef("");
+  useEffect(() => {
+    if (!focusKey || previous.current === focusKey) return;
+    previous.current = focusKey;
+    const coordinates: Array<[number, number]> = focusTarget === "points"
+      ? points.map((point) => [point.lat, point.lng])
+      : polygons.flatMap((polygon) => polygon.geometry.flatMap((part) => part.flatMap((ring) => ring.map(([lng, lat]) => [lat, lng] as [number, number]))));
+    if (!coordinates.length) return;
+    map.invalidateSize({ pan: false });
+    if (coordinates.length === 1) map.setView(coordinates[0], 15, { animate: true });
+    else {
+      const bounds = latLngBounds(coordinates);
+      if (bounds.isValid()) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15, animate: true });
+    }
+  }, [focusKey, focusTarget, map, points, polygons]);
+  return null;
+}
+
 function PointBoxSelection({ enabled, points, onSelect }: { enabled: boolean; points: ExplorerPoint[]; onSelect: (points: ExplorerPoint[]) => void }) {
   const map = useMap(), startRef = useRef<LatLng | null>(null);
   const [selectionBounds, setSelectionBounds] = useState<LatLngBounds | null>(null);
@@ -116,6 +140,8 @@ export default function ExplorerMap({
   onBoundsChange,
   extent,
   extentKey,
+  focusKey,
+  focusTarget,
 }: {
   points: ExplorerPoint[];
   polygons: ExplorerPolygon[];
@@ -136,6 +162,8 @@ export default function ExplorerMap({
   onBoundsChange?: (bounds: Bounds) => void;
   extent: Bounds | null;
   extentKey: string;
+  focusKey: string;
+  focusTarget: "points" | "polygons";
 }) {
   const center: LatLngExpression = extent ? [(extent[1] + extent[3]) / 2, (extent[0] + extent[2]) / 2] : [18.7357, -70.1627];
   const [draft, setDraft] = useState<{ mode: DrawMode; vertices: Coordinate[]; cursor: Coordinate | null }>({ mode: null, vertices: [], cursor: null });
@@ -162,6 +190,7 @@ export default function ExplorerMap({
     <MapContainer center={center} zoom={6} scrollWheelZoom preferCanvas className="leaflet-map">
     <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
     <FitInitialExtent extent={extent} extentKey={extentKey} />
+    <FitFilteredFeatures points={points} polygons={polygons} focusKey={focusKey} focusTarget={focusTarget} />
     <ViewportReporter onBoundsChange={onBoundsChange} />
     <PointBoxSelection key={multiSelect && !drawMode ? "selecting" : "browsing"} enabled={multiSelect && !drawMode && points.length > 0} points={points} onSelect={onMultiSelect} />
     {drawMode && <DrawingEvents mode={drawMode} vertices={draftVertices} onVertices={setDraftVertices} onCursor={setDraftCursor} onComplete={completeDrawing} />}

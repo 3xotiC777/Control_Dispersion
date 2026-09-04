@@ -65,6 +65,7 @@ function AutoCenterMap({ points, filterKey }: { points: Point[]; filterKey?: str
     if (!points.length || !filterKey) return;
     if (prevFilterKey.current !== filterKey) {
       prevFilterKey.current = filterKey;
+      map.invalidateSize({ pan: false });
       if (points.length === 1) {
         map.setView([points[0].lat, points[0].lng], 14, { animate: true });
       } else {

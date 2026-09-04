@@ -404,6 +404,11 @@ export function refineClusterSwaps(labels: number[], matrix: number[][], maxSwap
   return swaps;
 }
 
+export function refineClusterDispersion(labels: number[], matrix: number[][], maxSwaps = 120) {
+  const squaredMatrix = matrix.map((row) => row.map((distance) => distance * distance));
+  return refineClusterSwaps(labels, squaredMatrix, maxSwaps);
+}
+
 function capacitatedClusters(points: Point[], capacities: number[], customMatrix?: number[][]) {
   if (!points.length) return [] as number[];
   if (capacities.length === 1) return Array(points.length).fill(0);
@@ -426,6 +431,7 @@ function capacitatedClusters(points: Point[], capacities: number[], customMatrix
     labels = exactCapacityAssignment(matrix, medoids, capacities);
   }
   refineClusterSwaps(labels, matrix, points.length > 300 ? 36 : 90);
+  refineClusterDispersion(labels, matrix, points.length > 300 ? 48 : 120);
   return labels;
 }
 
@@ -433,12 +439,6 @@ type SequencedDayGroup = {
   day: number;
   points: Point[];
   medoid: { lat: number; lng: number };
-};
-
-type BalancedDayGroup = SequencedDayGroup & {
-  expected: number;
-  lower: number;
-  upper: number;
 };
 
 const dayGroupMedoid = (points: Point[]) => {
@@ -451,37 +451,6 @@ const dayGroupMedoid = (points: Point[]) => {
   return { lat: best.lat, lng: best.lng };
 };
 
-function rebalanceDayTolerance(groups: BalancedDayGroup[], anchorDay: number) {
-  const totalPoints = groups.reduce((sum, group) => sum + group.points.length, 0);
-  let boundaryMoves = 0;
-  while (boundaryMoves < totalPoints) {
-    const mandatorySources = groups.filter((group) => group.points.length > group.upper);
-    const mandatoryDestinations = groups.filter((group) => group.points.length < group.lower);
-    if (!mandatorySources.length && !mandatoryDestinations.length) break;
-    const sources = mandatorySources.length ? mandatorySources : groups.filter((group) => group.points.length > group.lower);
-    const destinations = mandatoryDestinations.length ? mandatoryDestinations : groups.filter((group) => group.points.length < group.upper);
-    if (!sources.length || !destinations.length) break;
-    const medoids = new Map(groups.map((group) => [group.day, dayGroupMedoid(group.points)]));
-    let bestSource: BalancedDayGroup | null = null, bestDestination: BalancedDayGroup | null = null, bestPoint: Point | null = null, bestCost = Infinity;
-    sources.forEach((source) => source.points.forEach((point) => destinations.forEach((destination) => {
-      if (source.day === destination.day) return;
-      const anchorPenalty = source.day === anchorDay || destination.day === anchorDay ? 1_000_000_000 : 0;
-      const cost = meters(point, medoids.get(destination.day)!) - meters(point, medoids.get(source.day)!) + anchorPenalty;
-      if (cost < bestCost || (cost === bestCost && `${source.day}:${destination.day}:${point.id}` < `${bestSource?.day}:${bestDestination?.day}:${bestPoint?.id}`)) {
-        bestSource = source; bestDestination = destination; bestPoint = point; bestCost = cost;
-      }
-    })));
-    if (!bestSource || !bestDestination || !bestPoint) break;
-    const pointIndex = bestSource.points.indexOf(bestPoint);
-    bestSource.points.splice(pointIndex, 1);
-    bestDestination.points.push(bestPoint);
-    bestPoint.day = bestDestination.day;
-    boundaryMoves++;
-  }
-  const unresolvedDays = groups.filter((group) => group.points.length < group.lower || group.points.length > group.upper).length;
-  return { boundaryMoves, unresolvedDays };
-}
-
 export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onlyMt?: string) {
   const byMt = new Map<string, Map<number, Point[]>>();
   points.forEach((point) => {
@@ -491,36 +460,130 @@ export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onl
     const daily = byMt.get(mt) ?? new Map<number, Point[]>(), group = daily.get(point.day) ?? [];
     group.push(point); daily.set(point.day, group); byMt.set(mt, daily);
   });
-  let relabeledPoints = 0, boundaryMoves = 0, reorderedGroups = 0, reorderedMts = 0, unresolvedDays = 0;
+  let relabeledPoints = 0, reorderedGroups = 0, reorderedMts = 0, unresolvedDays = 0;
+  const boundaryMoves = 0;
   byMt.forEach((daily, mt) => {
     const groups: SequencedDayGroup[] = [...daily.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([day, groupPoints]) => ({ day, points: groupPoints, medoid: dayGroupMedoid(groupPoints) }));
     if (groups.length < 2) return;
     const anchor = groups[0];
-    const ordered = [anchor, ...groups.slice(1).sort((a, b) => meters(anchor.medoid, a.medoid) - meters(anchor.medoid, b.medoid) || a.day - b.day)];
-    const balanced: BalancedDayGroup[] = groups.map((target, index) => {
-      const source = ordered[index], expected = forecast[mt]?.[target.day] ?? target.points.length;
+    const remaining = groups.slice(1);
+    const ordered = [anchor];
+    let previous = anchor;
+    groups.slice(1).forEach((target) => {
+      const expected = forecast[mt]?.[target.day] ?? target.points.length;
+      const exact = remaining.filter((candidate) => candidate.points.length === expected);
+      const withinTolerance = remaining.filter((candidate) => Math.abs(candidate.points.length - expected) <= DAY_FORECAST_TOLERANCE);
+      const candidates = exact.length ? exact : withinTolerance.length ? withinTolerance : remaining;
+      const source = [...candidates].sort((a, b) => {
+        const sizeDelta = Math.abs(a.points.length - expected) - Math.abs(b.points.length - expected);
+        return sizeDelta || meters(previous.medoid, a.medoid) - meters(previous.medoid, b.medoid) || a.day - b.day;
+      })[0];
+      ordered.push(source);
+      remaining.splice(remaining.indexOf(source), 1);
+      previous = source;
+    });
+    ordered.forEach((source, index) => {
+      const target = groups[index], expected = forecast[mt]?.[target.day] ?? target.points.length;
       if (source.day !== target.day) reorderedGroups++;
+      if (Math.abs(source.points.length - expected) > DAY_FORECAST_TOLERANCE) unresolvedDays++;
       source.points.forEach((point) => {
         if (point.day !== target.day) relabeledPoints++;
         point.day = target.day;
       });
-      return {
-        day: target.day,
-        points: source.points,
-        medoid: source.medoid,
-        expected,
-        lower: Math.max(0, expected - DAY_FORECAST_TOLERANCE),
-        upper: expected + DAY_FORECAST_TOLERANCE,
-      };
     });
-    const rebalanced = rebalanceDayTolerance(balanced, anchor.day);
-    boundaryMoves += rebalanced.boundaryMoves;
-    unresolvedDays += rebalanced.unresolvedDays;
-    if (ordered.some((group, index) => group.day !== groups[index].day) || rebalanced.boundaryMoves) reorderedMts++;
+    if (ordered.some((group, index) => group.day !== groups[index].day)) reorderedMts++;
   });
   return { relabeledPoints, boundaryMoves, reorderedGroups, reorderedMts, unresolvedDays };
+}
+
+const pairCount = (size: number) => size > 1 ? (size * (size - 1)) / 2 : 0;
+const normalizedDispersion = (sumSquaredDistances: number, size: number) => {
+  const pairs = pairCount(size);
+  return pairs ? sumSquaredDistances / pairs : 0;
+};
+
+export function improveDayGroupsWithinForecastTolerance(points: Point[], forecast: Forecast, onlyMt?: string) {
+  const byMt = new Map<string, Point[]>();
+  points.forEach((point) => {
+    if (point.kind !== "Titular" || !point.day) return;
+    const mt = operationalMt(point);
+    if (onlyMt && mt !== onlyMt) return;
+    const group = byMt.get(mt) ?? [];
+    group.push(point); byMt.set(mt, group);
+  });
+  const movedIds = new Set<string>();
+  let improvedMts = 0;
+  byMt.forEach((mtPoints, mt) => {
+    const days = [...new Set(mtPoints.map((point) => point.day!))].sort((a, b) => a - b);
+    if (days.length < 2) return;
+    const matrix = pointDistanceMatrix(mtPoints).map((row) => row.map((distance) => distance * distance));
+    const members = days.map((day) => mtPoints.map((point, index) => point.day === day ? index : -1).filter((index) => index >= 0));
+    const expected = days.map((day, index) => forecast[mt]?.[day] ?? members[index].length);
+    const lower = expected.map((count) => Math.max(0, count - DAY_FORECAST_TOLERANCE));
+    const upper = expected.map((count) => count + DAY_FORECAST_TOLERANCE);
+    const sums = members.map((indices) => {
+      let sum = 0;
+      for (let a = 0; a < indices.length; a++) for (let b = a + 1; b < indices.length; b++) sum += matrix[indices[a]][indices[b]];
+      return sum;
+    });
+    const diameters = members.map((indices) => {
+      let diameter = 0;
+      for (let a = 0; a < indices.length; a++) for (let b = a + 1; b < indices.length; b++) diameter = Math.max(diameter, matrix[indices[a]][indices[b]]);
+      return diameter;
+    });
+    const movedInMt = new Set<number>();
+    const maxMoves = days.length * DAY_FORECAST_TOLERANCE * 2;
+    while (movedInMt.size < maxMoves) {
+      let bestPoint = -1, bestSource = -1, bestDestination = -1, bestDelta = -1;
+      for (let source = 0; source < days.length; source++) {
+        const sourceSize = members[source].length;
+        if (sourceSize <= lower[source] || sourceSize <= 2) continue;
+        for (const pointIndex of members[source]) {
+          if (movedInMt.has(pointIndex)) continue;
+          const removed = members[source].reduce((sum, other) => sum + (other === pointIndex ? 0 : matrix[pointIndex][other]), 0);
+          const sourceAfter = normalizedDispersion(sums[source] - removed, sourceSize - 1);
+          for (let destination = 0; destination < days.length; destination++) {
+            if (destination === source || members[destination].length >= upper[destination] || members[destination].length < 2) continue;
+            const destinationSize = members[destination].length;
+            const added = members[destination].reduce((sum, other) => sum + matrix[pointIndex][other], 0);
+            const sourceBefore = normalizedDispersion(sums[source], sourceSize);
+            const destinationBefore = normalizedDispersion(sums[destination], destinationSize);
+            const destinationAfter = normalizedDispersion(sums[destination] + added, destinationSize + 1);
+            if (sourceAfter > sourceBefore + 1 || destinationAfter > destinationBefore + 1) continue;
+            const destinationDiameterAfter = members[destination].reduce((diameter, other) => Math.max(diameter, matrix[pointIndex][other]), diameters[destination]);
+            if (destinationDiameterAfter > diameters[destination] + 1) continue;
+            const before = sourceBefore + destinationBefore;
+            const after = sourceAfter + destinationAfter;
+            const delta = after - before;
+            const tie = `${days[source]}:${days[destination]}:${mtPoints[pointIndex].id}`;
+            const bestTie = bestPoint < 0 ? "" : `${days[bestSource]}:${days[bestDestination]}:${mtPoints[bestPoint].id}`;
+            if (delta < bestDelta || (delta === bestDelta && tie < bestTie)) {
+              bestPoint = pointIndex; bestSource = source; bestDestination = destination; bestDelta = delta;
+            }
+          }
+        }
+      }
+      if (bestPoint < 0) break;
+      const sourcePosition = members[bestSource].indexOf(bestPoint);
+      const removed = members[bestSource].reduce((sum, other) => sum + (other === bestPoint ? 0 : matrix[bestPoint][other]), 0);
+      const added = members[bestDestination].reduce((sum, other) => sum + matrix[bestPoint][other], 0);
+      members[bestSource].splice(sourcePosition, 1);
+      members[bestDestination].push(bestPoint);
+      sums[bestSource] -= removed;
+      sums[bestDestination] += added;
+      diameters[bestSource] = members[bestSource].reduce((diameter, left, leftIndex) => {
+        for (let rightIndex = leftIndex + 1; rightIndex < members[bestSource].length; rightIndex++) diameter = Math.max(diameter, matrix[left][members[bestSource][rightIndex]]);
+        return diameter;
+      }, 0);
+      mtPoints[bestPoint].day = days[bestDestination];
+      movedInMt.add(bestPoint);
+      movedIds.add(mtPoints[bestPoint].id);
+    }
+    if (movedInMt.size) improvedMts++;
+  });
+  return { movedPoints: movedIds.size, improvedMts };
 }
 
 export function refreshAverages(points: Point[]) {
@@ -627,13 +690,18 @@ export function finalizeAssignment(points: Point[], forecast: Forecast, mode: Pl
   const next = points.map((point) => ({ ...point }));
   const notices: Notice[] = [];
   const sequencing = sequenceDaysByProximity(next, forecast, onlyMt);
-  if (sequencing.reorderedGroups || sequencing.boundaryMoves) notices.push({
+  const flexibility = improveDayGroupsWithinForecastTolerance(next, forecast, onlyMt);
+  if (sequencing.reorderedGroups) notices.push({
     type: "info",
-    text: `Secuencia geográfica final: se renumeraron ${sequencing.reorderedGroups} grupos en ${sequencing.reorderedMts} MT FINAL. ${sequencing.boundaryMoves ? `${sequencing.boundaryMoves} titular${sequencing.boundaryMoves === 1 ? "" : "es"} fronterizo${sequencing.boundaryMoves === 1 ? "" : "s"} cambiaron de grupo` : "No fue necesario mover puntos entre grupos"}; se aceptó una tolerancia de ±${DAY_FORECAST_TOLERANCE} frente al forecast.`,
+    text: `Secuencia geográfica final: se renumeraron ${sequencing.reorderedGroups} grupos completos en ${sequencing.reorderedMts} MT FINAL, sin separar puntos de su grupo. Se priorizaron grupos con la cantidad exacta del forecast y solo se admite una diferencia de ±${DAY_FORECAST_TOLERANCE} cuando la base ya llega desbalanceada.`,
   });
   if (sequencing.unresolvedDays) notices.push({ type: "warn", text: `${sequencing.unresolvedDays} jornada${sequencing.unresolvedDays === 1 ? "" : "s"} no pudieron quedar dentro de la tolerancia ±${DAY_FORECAST_TOLERANCE} por falta de puntos compatibles.` });
+  if (flexibility.movedPoints) notices.push({
+    type: "info",
+    text: `Flexibilidad del forecast: ${flexibility.movedPoints} titular${flexibility.movedPoints === 1 ? "" : "es"} fronterizo${flexibility.movedPoints === 1 ? "" : "s"} cambiaron de día en ${flexibility.improvedMts} MT FINAL porque redujeron la dispersión. ${sequencing.unresolvedDays ? `Cada cambio respetó el rango permitido de ±${DAY_FORECAST_TOLERANCE} puntos; las jornadas ya desbalanceadas se reportan por separado.` : `Todas las jornadas se mantienen dentro de ±${DAY_FORECAST_TOLERANCE} puntos.`}`,
+  });
   if (mode === "with-spares") allocateSpares(next, forecast, notices);
-  else if (!onlyMt) notices.unshift({ type: "info", text: "Modo solo titulares detectado: no se aplicó la relación 1:3; se usó el forecast por MT FINAL y día, con tolerancia final de ±2 durante la secuenciación geográfica. Los titulares excedentes quedaron sin día." });
+  else if (!onlyMt) notices.unshift({ type: "info", text: "Modo solo titulares detectado: no se aplicó la relación 1:3; se usó el forecast por MT FINAL y día. La flexibilidad final de ±2 solo se consume cuando reduce la dispersión, y los titulares excedentes quedan sin día." });
   return { points: refreshAverages(next), notices };
 }
 
