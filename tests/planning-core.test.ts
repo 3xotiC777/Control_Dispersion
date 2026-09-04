@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assign, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refineClusterDispersion, sequenceDaysByProximity, type Point } from "../app/planning-core";
+import { assign, forecastToleranceFor, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refineClusterDispersion, sequenceDaysByProximity, type Point } from "../app/planning-core";
 
 function point(index: number, lng: number, kind: Point["kind"] = "Titular"): Point {
   return {
@@ -58,30 +58,26 @@ test("renumera grupos completos desde el primer día hacia el más lejano", () =
   assert.deepEqual(titles.filter((item) => item.day === 5).map((item) => item.id), ["3", "4"]);
 });
 
-test("renumera solo entre grupos que conservan la cuota exacta", () => {
+test("renumera grupos completos dentro del margen del forecast", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 10), point(4, 1), point(5, 1.001), point(6, 2)];
   titles.forEach((item, index) => { item.day = index < 2 ? 1 : index === 2 ? 2 : index < 5 ? 3 : 4; item.assignedMt = "MT1"; });
+  const originalGroups = [["1", "2"], ["3"], ["4", "5"], ["6"]];
   const result = sequenceDaysByProximity(titles, { MT1: { 1: 2, 2: 1, 3: 2, 4: 1 } });
   assert.equal(result.boundaryMoves, 0);
-  assert.equal(titles.filter((item) => item.day === 1).length, 2);
-  assert.equal(titles.filter((item) => item.day === 2).length, 1);
-  assert.equal(titles.filter((item) => item.day === 3).length, 2);
-  assert.equal(titles.filter((item) => item.day === 4).length, 1);
-  assert.equal(titles.find((item) => item.id === "6")?.day, 2);
-  assert.equal(titles.find((item) => item.id === "4")?.day, 3);
-  assert.equal(titles.find((item) => item.id === "3")?.day, 4);
+  assert.ok(result.routeMetersAfter <= result.routeMetersBefore);
+  originalGroups.forEach((ids) => assert.equal(new Set(ids.map((id) => titles.find((item) => item.id === id)?.day)).size, 1));
+  const expected = { 1: 2, 2: 1, 3: 2, 4: 1 };
+  Object.entries(expected).forEach(([day, count]) => assert.ok(Math.abs(titles.filter((item) => item.day === Number(day)).length - count) <= forecastToleranceFor(count)));
 });
 
-test("conserva grupos completos aunque sus centros no sigan el orden de los días", () => {
+test("conserva grupos completos al corregir el orden geográfico de los días", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 10), point(4, 1), point(5, 1.001), point(6, 1.002), point(7, 1.003), point(8, 1.004)];
   titles.forEach((item, index) => { item.day = index < 2 ? 1 : index === 2 ? 2 : 3; item.assignedMt = "MT1"; });
   const result = sequenceDaysByProximity(titles, { MT1: { 1: 2, 2: 1, 3: 5 } });
   assert.equal(result.boundaryMoves, 0);
   assert.equal(result.unresolvedDays, 0);
-  assert.equal(titles.filter((item) => item.day === 1).length, 2);
-  assert.equal(titles.filter((item) => item.day === 2).length, 1);
-  assert.equal(titles.filter((item) => item.day === 3).length, 5);
-  assert.equal(titles.find((item) => item.id === "3")?.day, 2);
+  assert.ok(result.routeMetersAfter <= result.routeMetersBefore);
+  [["1", "2"], ["3"], ["4", "5", "6", "7", "8"]].forEach((ids) => assert.equal(new Set(ids.map((id) => titles.find((item) => item.id === id)?.day)).size, 1));
 });
 
 test("penaliza con más fuerza los pares extremos sin alterar las cuotas", () => {
@@ -102,13 +98,53 @@ test("penaliza con más fuerza los pares extremos sin alterar las cuotas", () =>
   assert.deepEqual([0, 1].map((cluster) => labels.filter((label) => label === cluster).length), [3, 3]);
 });
 
-test("usa la tolerancia de dos puntos solo cuando reduce la dispersión", () => {
+test("usa el margen del forecast solo cuando reduce la dispersión", () => {
   const titles = [point(1, 0), point(2, 0.001), point(3, 0.002), point(4, 0.1), point(5, 0.098), point(6, 0.099), point(7, 0.1), point(8, 0.101)];
   titles.forEach((item, index) => { item.day = index < 4 ? 1 : 2; item.assignedMt = "MT1"; });
   const result = improveDayGroupsWithinForecastTolerance(titles, { MT1: { 1: 4, 2: 4 } });
   assert.equal(result.movedPoints, 1);
   assert.equal(titles.find((item) => item.id === "4")?.day, 2);
   assert.deepEqual([1, 2].map((day) => titles.filter((item) => item.day === day).length), [3, 5]);
+});
+
+test("mueve junto un pequeño bloque lejano hacia el día geográficamente correcto", () => {
+  const titles = [
+    ...Array.from({ length: 17 }, (_, index) => point(index + 1, index * 0.0001)),
+    ...Array.from({ length: 3 }, (_, index) => point(index + 18, 1 + index * 0.0001)),
+    ...Array.from({ length: 20 }, (_, index) => point(index + 21, 1 + index * 0.0001)),
+  ];
+  titles.forEach((item, index) => { item.day = index < 20 ? 1 : 2; item.assignedMt = "MT1"; });
+  const result = improveDayGroupsWithinForecastTolerance(titles, { MT1: { 1: 20, 2: 20 } });
+  assert.equal(result.movedPoints, 3);
+  assert.deepEqual([1, 2].map((day) => titles.filter((item) => item.day === day).length), [17, 23]);
+  ["18", "19", "20"].forEach((id) => assert.equal(titles.find((item) => item.id === id)?.day, 2));
+});
+
+test("forma desde el inicio grupos compactos usando el forecast como guía", () => {
+  const titles = [
+    ...Array.from({ length: 17 }, (_, index) => point(index + 1, index * 0.0001)),
+    ...Array.from({ length: 23 }, (_, index) => point(index + 18, 1 + index * 0.0001)),
+  ];
+  const result = assign(titles, { MT1: { 1: 20, 2: 20 } }, "titles-only", { finalize: false });
+  assert.deepEqual([1, 2].map((day) => result.points.filter((item) => item.day === day).length).sort((a, b) => a - b), [17, 23]);
+});
+
+test("evita volver al final del mes a una zona ya atendida", () => {
+  const groups = [
+    { day: 7, count: 20, lng: 0 }, { day: 8, count: 20, lng: 0.1 }, { day: 9, count: 20, lng: 0.2 },
+    { day: 10, count: 20, lng: 0.3 }, { day: 21, count: 20, lng: 10 }, { day: 22, count: 20, lng: 10.1 },
+    { day: 23, count: 23, lng: 0.4 },
+  ];
+  let index = 1;
+  const titles = groups.flatMap((group) => Array.from({ length: group.count }, (_, offset) => {
+    const item = point(index++, group.lng + offset * 0.00001);
+    item.day = group.day; item.assignedMt = "MT1";
+    return item;
+  }));
+  const forecast = { MT1: Object.fromEntries(groups.map(({ day, count }) => [day, count])) };
+  const result = sequenceDaysByProximity(titles, forecast);
+  assert.ok(result.routeMetersAfter < result.routeMetersBefore * 0.6);
+  assert.equal(result.unresolvedDays, 0);
 });
 
 test("no consume la tolerancia cuando los días ya son compactos", () => {
