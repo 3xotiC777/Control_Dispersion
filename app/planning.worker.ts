@@ -66,7 +66,7 @@ async function handleRequest(request: WorkerRequest) {
     const initial = assign(sourcePoints, forecast, mode, { finalize: false });
     progress("Detectando cruces que necesitan QA vial…");
     const smartQa = await runSmartRoadQa(initial.points, progress);
-    progress(mode === "with-spares" ? "Ordenando días y asignando suplentes…" : "Ordenando los días desde el grupo más cercano al más lejano…");
+    progress(mode === "with-spares" ? "Ordenando días y asignando suplentes…" : "Ordenando el recorrido para reducir regresos entre zonas…");
     const finalized = finalizeAssignment(smartQa.points, forecast, mode);
     currentPoints = finalized.points;
     return { points: finalized.points, notices: [...finalized.notices, ...smartQa.notices, ...initial.notices], mode: initial.mode };

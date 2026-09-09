@@ -155,6 +155,52 @@ test("no consume la tolerancia cuando los días ya son compactos", () => {
   assert.deepEqual([1, 2].map((day) => titles.filter((item) => item.day === day).length), [4, 4]);
 });
 
+test("recorre un corredor desde un extremo aunque las jornadas grandes estén a mitad del forecast", () => {
+  // The larger central group used to pin the route to day 8, causing a
+  // northbound start, a return to the center and finally a southbound finish.
+  const groups = [
+    { day: 7, count: 20, lng: 0.4 }, { day: 8, count: 35, lng: 0.401 },
+    { day: 9, count: 15, lng: 0.402 }, { day: 10, count: 20, lng: 0.8 },
+    { day: 11, count: 20, lng: 1 }, { day: 12, count: 25, lng: 0.2 },
+    { day: 14, count: 15, lng: 0 },
+  ];
+  let id = 0;
+  const titles = groups.flatMap((group) => Array.from({ length: group.count }, (_, offset) => ({
+    ...point(id++, group.lng + offset * 0.00001), day: group.day, assignedMt: "MT1",
+  })));
+  const originalIds = titles.map((item) => item.id).sort();
+  const forecast = { MT1: Object.fromEntries(groups.map(({ day }) => [day, day === 8 ? 30 : 20])) };
+  const result = sequenceDaysByProximity(titles, forecast);
+  assert.equal(result.corridorMts, 1);
+  assert.ok(result.boundaryMoves > 0);
+  assert.equal(result.unresolvedDays, 0);
+  assert.ok(result.routeMetersAfter < result.routeMetersBefore * 0.85);
+  const firstDay = titles.filter((item) => item.day === 7);
+  const lastDay = titles.filter((item) => item.day === 14);
+  assert.ok(firstDay.every((item) => item.lng < 0.01));
+  assert.ok(lastDay.every((item) => item.lng >= 1));
+  assert.deepEqual(titles.map((item) => item.id).sort(), originalIds);
+  assert.deepEqual([...new Set(titles.map((item) => item.day))].sort((a, b) => a! - b!), groups.map((group) => group.day));
+  groups.forEach(({ day }) => {
+    const count = titles.filter((item) => item.day === day).length;
+    const expected = forecast.MT1[day];
+    assert.ok(Math.abs(count - expected) <= forecastToleranceFor(expected));
+  });
+  const chronological = groups.flatMap(({ day }) => titles.filter((item) => item.day === day).map((item) => item.lng).sort((a, b) => a - b));
+  assert.deepEqual(chronological, [...chronological].sort((a, b) => a - b));
+});
+
+test("no mezcla zonas remotas para forzar un barrido incompatible con el forecast", () => {
+  const groups = [{ day: 7, count: 35, lng: 1 }, { day: 8, count: 20, lng: 0 }, { day: 9, count: 20, lng: 2 }];
+  let id = 0;
+  const titles = groups.flatMap((group) => Array.from({ length: group.count }, () => ({ ...point(id++, group.lng), day: group.day, assignedMt: "MT1" })));
+  const result = sequenceDaysByProximity(titles, { MT1: { 7: 35, 8: 20, 9: 20 } });
+  assert.equal(result.corridorMts, 0);
+  assert.equal(result.boundaryMoves, 0);
+  assert.equal(result.unresolvedDays, 0);
+  for (const day of [7, 8, 9]) assert.equal(new Set(titles.filter((item) => item.day === day).map((item) => item.lng)).size, 1);
+});
+
 test("detecta suplentes desde la columna SELECCION aunque sus coordenadas no sean utilizables", () => {
   const rows = [{ "MT FINAL": "MT1", SELECCION: "T", LATITUD: 1, LONGITUD: 1, PDV: "A", RefID: "1" }, { "MT FINAL": "MT1", SELECCION: "S1", LATITUD: "", LONGITUD: "", PDV: "B", RefID: "2" }];
   assert.equal(planningModeFromRows(rows), "with-spares");
