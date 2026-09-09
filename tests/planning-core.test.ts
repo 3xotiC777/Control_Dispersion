@@ -171,7 +171,7 @@ test("recorre un corredor desde un extremo aunque las jornadas grandes estén a 
   const originalIds = titles.map((item) => item.id).sort();
   const forecast = { MT1: Object.fromEntries(groups.map(({ day }) => [day, day === 8 ? 30 : 20])) };
   const result = sequenceDaysByProximity(titles, forecast);
-  assert.equal(result.corridorMts, 1);
+  assert.equal(result.continuousMts, 1);
   assert.ok(result.boundaryMoves > 0);
   assert.equal(result.unresolvedDays, 0);
   assert.ok(result.routeMetersAfter < result.routeMetersBefore * 0.85);
@@ -195,10 +195,43 @@ test("no mezcla zonas remotas para forzar un barrido incompatible con el forecas
   let id = 0;
   const titles = groups.flatMap((group) => Array.from({ length: group.count }, () => ({ ...point(id++, group.lng), day: group.day, assignedMt: "MT1" })));
   const result = sequenceDaysByProximity(titles, { MT1: { 7: 35, 8: 20, 9: 20 } });
-  assert.equal(result.corridorMts, 0);
+  assert.equal(result.continuousMts, 0);
   assert.equal(result.boundaryMoves, 0);
   assert.equal(result.unresolvedDays, 0);
   for (const day of [7, 8, 9]) assert.equal(new Set(titles.filter((item) => item.day === day).map((item) => item.lng)).size, 1);
+});
+
+test("completa cada zona en fechas consecutivas también en un territorio ancho y curvo", () => {
+  const groups = [
+    { day: 10, count: 20, lat: 0.2, lng: 0.2, zone: "centro" },
+    { day: 11, count: 35, lat: 0.201, lng: 0.2, zone: "centro" },
+    { day: 12, count: 15, lat: 0.202, lng: 0.2, zone: "centro" },
+    { day: 14, count: 20, lat: 0.2, lng: 0, zone: "norte" },
+    { day: 15, count: 20, lat: 0.2, lng: -0.2, zone: "oeste" },
+    { day: 16, count: 25, lat: 0, lng: 0.2, zone: "este" },
+    { day: 17, count: 15, lat: 0, lng: 0, zone: "sur" },
+  ];
+  let id = 0;
+  const titles = groups.flatMap((group) => Array.from({ length: group.count }, (_, offset) => ({
+    ...point(id++, group.lng + offset * 0.00001), lat: group.lat, name: group.zone, day: group.day, assignedMt: "MT1",
+  })));
+  const forecast = { MT1: Object.fromEntries(groups.map(({ day }) => [day, day === 11 ? 30 : 20])) };
+  const otherMt = { ...point(id++, 1), mt: "MT2", assignedMt: "MT2", day: 10 };
+  const spare = { ...point(id++, 1, "Suplente"), assignedMt: "MT1", day: 10 };
+  const input = [...titles, otherMt, spare];
+  const result = sequenceDaysByProximity(input, forecast, "MT1");
+  assert.equal(result.continuousMts, 1);
+  assert.equal(result.unresolvedDays, 0);
+  assert.ok(result.routeMetersAfter < result.routeMetersBefore * 0.8);
+  assert.equal(new Set(input.map((item) => item.id)).size, input.length);
+  assert.equal(otherMt.day, 10);
+  assert.equal(spare.day, 10);
+  const days = groups.map((group) => group.day);
+  for (const zone of new Set(groups.map((group) => group.zone))) {
+    const occupied = days.map((day, index) => titles.some((item) => item.name === zone && item.day === day) ? index : -1).filter((index) => index >= 0);
+    assert.equal(occupied.length, occupied[occupied.length - 1] - occupied[0] + 1, `La zona ${zone} no debe reaparecer días después`);
+  }
+  days.forEach((day) => assert.ok(Math.abs(titles.filter((item) => item.day === day).length - forecast.MT1[day]) <= forecastToleranceFor(forecast.MT1[day])));
 });
 
 test("detecta suplentes desde la columna SELECCION aunque sus coordenadas no sean utilizables", () => {

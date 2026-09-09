@@ -598,9 +598,9 @@ const dayGroupMedoid = (points: Point[]) => {
 const dayRouteDistance = (groups: SequencedDayGroup[]) => groups.slice(1).reduce((sum, group, index) => sum + meters(groups[index].medoid, group.medoid), 0);
 const dayRouteKey = (groups: SequencedDayGroup[]) => groups.map((group) => String(group.day).padStart(2, "0")).join(":");
 
-// Long, narrow territories need a sweep from one end to the other. Optimizing
-// only the order of fixed-size groups can force a return to fill a larger day.
-function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<number, number>) {
+// Repartition a geographic traversal into consecutive working days. Fixed-size
+// groups must not force a later return just to fill a larger forecast slot.
+function continuousDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<number, number>) {
   if (groups.length < 3) return null;
   const center = {
     lat: groups.reduce((sum, group) => sum + group.medoid.lat, 0) / groups.length,
@@ -613,8 +613,7 @@ function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<nu
   const yy = coordinates.reduce((sum, point) => sum + point.y * point.y, 0);
   const xySum = coordinates.reduce((sum, point) => sum + point.x * point.y, 0);
   const discriminant = Math.hypot(xx - yy, 2 * xySum);
-  // Keep ordinary routing for broad/circular territories without a clear axis.
-  if (xx + yy < 1e-10 || (xx + yy + discriminant) / (2 * (xx + yy)) < 0.85) return null;
+  const isCorridor = xx + yy >= 1e-10 && (xx + yy + discriminant) / (2 * (xx + yy)) >= 0.85;
   const angle = Math.atan2(2 * xySum, xx - yy) / 2;
   let axisX = Math.cos(angle), axisY = Math.sin(angle);
   if (axisY < 0) { axisX *= -1; axisY *= -1; }
@@ -625,7 +624,7 @@ function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<nu
   const positions = groups.map((group) => projection(group.medoid));
   const variation = positions.slice(1).reduce((sum, position, index) => sum + Math.abs(position - positions[index]), 0);
   const progress = Math.abs(positions[positions.length - 1] - positions[0]);
-  if ((variation - progress) * 111195 < 5000) return null;
+  const needsSweep = isCorridor && (variation - progress) * 111195 >= 5000;
   const originalPoints = groups.flatMap((group) => group.points);
   const matrix = pointDistanceMatrix(originalPoints).map((row) => row.map((distance) => distance * distance));
   const indices = new Map(originalPoints.map((point, index) => [point, index]));
@@ -641,15 +640,40 @@ function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<nu
   const maximumSize = Math.max(...upper);
   const ordered = originalPoints.map((point, index) => ({ point, index, position: projection(point) }))
     .sort((a, b) => a.position - b.position || a.point.id.localeCompare(b.point.id));
+  const geographicGroups = routeDayGroups(groups, dailyForecast, true);
+  // Follow the area's shape instead of imposing a north/south sweep on every MT.
+  // Within each existing group, approach from the previous group and leave
+  // towards the next so boundary adjustments use geographically nearby points.
+  const geographicOrder = geographicGroups.flatMap((group, index) => {
+    const previous = xy(geographicGroups[Math.max(0, index - 1)].medoid);
+    const next = xy(geographicGroups[Math.min(geographicGroups.length - 1, index + 1)].medoid);
+    return group.points.map((point) => {
+      const position = xy(point);
+      return { point, index: indices.get(point)!, position: position.x * (next.x - previous.x) + position.y * (next.y - previous.y) };
+    }).sort((a, b) => a.position - b.position || a.point.id.localeCompare(b.point.id));
+  });
+  const traversals = [geographicOrder, [...geographicOrder].reverse()];
+  if (needsSweep) traversals.unshift(ordered, [...ordered].reverse());
   const candidateScore = (candidate: SequencedDayGroup[]) => {
     const positions = candidate.map((group) => projection(group.medoid));
     const variation = positions.slice(1).reduce((sum, position, index) => sum + Math.abs(position - positions[index]), 0);
     const progress = Math.abs(positions[positions.length - 1] - positions[0]);
-    return dayRouteDistance(candidate) + Math.max(0, variation - progress) * 111195;
+    let revisits = 0;
+    // A return means two nearby days separated by a substantial excursion.
+    // The penalty applies to any territory shape, not just elongated corridors.
+    for (let left = 0; left < candidate.length; left++) for (let right = left + 2; right < candidate.length; right++) {
+      const separation = meters(candidate[left].medoid, candidate[right].medoid);
+      if (separation > 5000) continue;
+      let excursion = 0;
+      for (let middle = left + 1; middle < right; middle++) {
+        excursion = Math.max(excursion, Math.min(meters(candidate[left].medoid, candidate[middle].medoid), meters(candidate[right].medoid, candidate[middle].medoid)));
+      }
+      revisits += Math.max(0, excursion - Math.max(5000, separation * 2));
+    }
+    return dayRouteDistance(candidate) + revisits * 2 + (isCorridor ? Math.max(0, variation - progress) * 111195 : 0);
   };
   let best: SequencedDayGroup[] | null = null, bestScore = candidateScore(groups);
-  for (const direction of [1, -1]) {
-    const traversal = direction === 1 ? ordered : [...ordered].reverse();
+  for (const traversal of traversals) {
     // Cache the dispersion of every feasible contiguous block in O(n * k²).
     const blockCosts = Array.from({ length: total }, () => new Float64Array(maximumSize + 1).fill(Infinity));
     for (let start = 0; start < total; start++) {
@@ -681,7 +705,7 @@ function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<nu
     }
     // Allow a small absolute change for nearly coincident groups as well as
     // the relative margin; a zero-diameter baseline must not lock the route.
-    if (!Number.isFinite(previous[total]) || previous[total] > originalDispersion * 1.1 + groups.length * 1000 ** 2) continue;
+    if (!Number.isFinite(previous[total]) || previous[total] > originalDispersion * 1.25 + groups.length * 1000 ** 2) continue;
     const candidate: SequencedDayGroup[] = [];
     let end = total;
     for (let day = groups.length - 1; day >= 0; day--) {
@@ -696,11 +720,12 @@ function corridorDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<nu
   return best;
 }
 
-function routeDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<number, number>) {
+function routeDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<number, number>, geographyOnly = false) {
   const expected = groups.map((target) => dailyForecast[target.day] ?? target.points.length);
-  const fits = (group: SequencedDayGroup, position: number) => Math.abs(group.points.length - expected[position]) <= forecastToleranceFor(expected[position]);
+  const fits = (group: SequencedDayGroup, position: number) => geographyOnly || Math.abs(group.points.length - expected[position]) <= forecastToleranceFor(expected[position]);
   const valid = (order: SequencedDayGroup[]) => order.every((group, position) => fits(group, position));
   const canMatch = (remaining: SequencedDayGroup[], positions: number[]) => {
+    if (geographyOnly) return true;
     const matchedGroup = Array(positions.length).fill(-1);
     const visit = (groupIndex: number, seen: Set<number>): boolean => {
       for (let positionIndex = 0; positionIndex < positions.length; positionIndex++) {
@@ -780,18 +805,18 @@ export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onl
     const daily = byMt.get(mt) ?? new Map<number, Point[]>(), group = daily.get(point.day) ?? [];
     group.push(point); daily.set(point.day, group); byMt.set(mt, daily);
   });
-  let relabeledPoints = 0, reorderedGroups = 0, reorderedMts = 0, unresolvedDays = 0, routeMetersBefore = 0, routeMetersAfter = 0, boundaryMoves = 0, corridorMts = 0;
+  let relabeledPoints = 0, reorderedGroups = 0, reorderedMts = 0, unresolvedDays = 0, routeMetersBefore = 0, routeMetersAfter = 0, boundaryMoves = 0, continuousMts = 0;
   byMt.forEach((daily, mt) => {
     const groups: SequencedDayGroup[] = [...daily.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([day, groupPoints]) => ({ day, points: groupPoints, medoid: dayGroupMedoid(groupPoints) }));
     if (groups.length < 2) return;
     const routed = routeDayGroups(groups, forecast[mt] ?? {});
-    const corridor = corridorDayGroups(routed.map((group, index) => ({ ...group, day: groups[index].day })), forecast[mt] ?? {});
-    const ordered = corridor ?? routed;
-    if (corridor) {
-      corridorMts++;
-      const destination = new Map(corridor.flatMap((group) => group.points.map((point) => [point, group.day] as const)));
+    const continuous = continuousDayGroups(routed.map((group, index) => ({ ...group, day: groups[index].day })), forecast[mt] ?? {});
+    const ordered = continuous ?? routed;
+    if (continuous) {
+      continuousMts++;
+      const destination = new Map(continuous.flatMap((group) => group.points.map((point) => [point, group.day] as const)));
       boundaryMoves += groups.reduce((sum, group) => {
         const overlaps = new Map<number, number>();
         group.points.forEach((point) => { const day = destination.get(point)!; overlaps.set(day, (overlaps.get(day) ?? 0) + 1); });
@@ -811,7 +836,7 @@ export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onl
     });
     if (ordered.some((group, index) => group.points.some((point) => !groups[index].points.includes(point)))) reorderedMts++;
   });
-  return { relabeledPoints, boundaryMoves, reorderedGroups, reorderedMts, unresolvedDays, routeMetersBefore, routeMetersAfter, corridorMts };
+  return { relabeledPoints, boundaryMoves, reorderedGroups, reorderedMts, unresolvedDays, routeMetersBefore, routeMetersAfter, continuousMts };
 }
 
 const pairCount = (size: number) => size > 1 ? (size * (size - 1)) / 2 : 0;
@@ -957,9 +982,9 @@ export function finalizeAssignment(points: Point[], forecast: Forecast, mode: Pl
     type: "info",
     text: `Secuencia geográfica final: se organizaron ${sequencing.reorderedGroups} jornadas en ${sequencing.reorderedMts} MT FINAL para reducir retornos entre zonas. El forecast funciona como guía con una flexibilidad máxima de ±${DAY_FORECAST_TOLERANCE} puntos.`,
   });
-  if (sequencing.corridorMts) notices.push({
+  if (sequencing.continuousMts) notices.push({
     type: "info",
-    text: `Recorrido de extremo a extremo aplicado en ${sequencing.corridorMts} MT FINAL. Se ajustaron las fronteras entre jornadas para avanzar por las zonas en orden, respetando el margen del forecast y controlando la dispersión diaria.`,
+    text: `Continuidad del recorrido mejorada en ${sequencing.continuousMts} MT FINAL. Se ajustaron las fronteras entre jornadas para completar cada zona antes de alejarse de ella, respetando el margen del forecast y controlando la dispersión diaria.`,
   });
   if (sequencing.unresolvedDays) notices.push({ type: "warn", text: `${sequencing.unresolvedDays} jornada${sequencing.unresolvedDays === 1 ? "" : "s"} no pudieron quedar dentro de la flexibilidad máxima de ±${DAY_FORECAST_TOLERANCE} por falta de grupos compatibles.` });
   if (flexibility.movedPoints) notices.push({
