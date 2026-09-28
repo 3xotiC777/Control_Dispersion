@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assign, forecastToleranceFor, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refineClusterDispersion, sequenceDaysByProximity, type Point } from "../app/planning-core";
+import { assign, baseColumns, extractPoints, forecastToleranceFor, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refineClusterDispersion, sequenceDaysByProximity, type Point } from "../app/planning-core";
 
 function point(index: number, lng: number, kind: Point["kind"] = "Titular"): Point {
   return {
@@ -237,4 +237,25 @@ test("completa cada zona en fechas consecutivas también en un territorio ancho 
 test("detecta suplentes desde la columna SELECCION aunque sus coordenadas no sean utilizables", () => {
   const rows = [{ "MT FINAL": "MT1", SELECCION: "T", LATITUD: 1, LONGITUD: 1, PDV: "A", RefID: "1" }, { "MT FINAL": "MT1", SELECCION: "S1", LATITUD: "", LONGITUD: "", PDV: "B", RefID: "2" }];
   assert.equal(planningModeFromRows(rows), "with-spares");
+});
+
+test("acepta TITULAR como selección y asigna sus puntos según el forecast", () => {
+  const rows = [1, 2, 3].map((index) => ({ Zona: "N/A", MT: "Por definir", "MT FINAL": "MT1", SELECCION: "TITULAR", LATITUD: 7.8, LONGITUD: -80.4 - index * 0.001, PDV: `P${index}`, RefID: String(index) }));
+  const points = extractPoints(rows);
+  assert.equal(points.length, 3);
+  assert.ok(points.every((item) => item.kind === "Titular"));
+  assert.ok(points.every((item) => item.mt === "MT1"));
+  const result = assign(points, { MT1: { 1: 2, 2: 1 } });
+  assert.equal(result.points.filter((item) => item.day !== null).length, 3);
+  assert.equal(result.notices.filter((notice) => notice.type === "warn").length, 0);
+});
+
+test("exige MT FINAL aunque existan columnas MT o Zona", () => {
+  const rows = [{ Zona: "N/A", MT: "MT1", SELECCION: "T", LATITUD: 7.8, LONGITUD: -80.4, PDV: "P1", RefID: "1" }];
+  assert.throws(() => baseColumns(rows), /MT FINAL/);
+});
+
+test("prefiere RefIDEmbotellador a un código genérico", () => {
+  const rows = [{ "CODIGO DN": "otro", RefIDEmbotellador: "5001", "MT FINAL": "MT1", SELECCION: "T", LATITUD: 7.8, LONGITUD: -80.4, PDV: "P1" }];
+  assert.equal(extractPoints(rows)[0].refId, "5001");
 });

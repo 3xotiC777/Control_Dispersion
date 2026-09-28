@@ -96,12 +96,12 @@ export function baseColumns(rows: Raw[]) {
   if (!rows.length) throw new Error("La base de puntos no contiene registros.");
   const headers = Object.keys(rows[0] ?? {});
   const columns = {
-    mt: column(rows, ["MTFINAL", "MT", "TERRITORIO", "ZONA", "RUTA"]) ?? headers.find((h) => key(h).includes("MT") || key(h).includes("TERRITORIO")),
+    mt: column(rows, ["MTFINAL"]),
     selection: column(rows, ["SELECCION", "SELECCIONPUNTO", "TIPO", "TIPOPUNTO", "KIND", "CLASE", "CATEGORIA"]) ?? headers.find((h) => key(h).includes("SELECC") || key(h).includes("TIPO")),
     latitude: column(rows, ["LATITUDE", "LATITUD", "LAT", "Y"]) ?? headers.find((h) => key(h).startsWith("LAT")),
     longitude: column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG", "X"]) ?? headers.find((h) => key(h).startsWith("LON") || key(h).startsWith("LNG")),
     pdv: column(rows, ["PDV", "NOMBRE", "CLIENTE", "PUNTO", "NAME", "DESCRIPCION", "ESTABLECIMIENTO"]) ?? headers.find((h) => key(h).includes("PDV") || key(h).includes("NOMBRE") || key(h).includes("CLIENTE")),
-    refId: column(rows, ["REFID", "ID", "CODIGO", "COD", "REF", "PUNTOID"]) ?? headers.find((h) => key(h).includes("REF") || key(h).includes("ID") || key(h).includes("COD")),
+    refId: column(rows, ["REFID"]) ?? headers.find((h) => key(h).startsWith("REFID")) ?? column(rows, ["ID", "CODIGO", "COD", "REF", "PUNTOID"]) ?? headers.find((h) => key(h).includes("REF") || key(h).includes("ID") || key(h).includes("COD")),
   };
   const labels: Record<keyof typeof columns, string> = { mt: "MT FINAL", selection: "SELECCION", latitude: "LATITUD", longitude: "LONGITUD", pdv: "PDV", refId: "RefID" };
   const missing = (Object.keys(columns) as Array<keyof typeof columns>).find((name) => !columns[name]);
@@ -112,6 +112,13 @@ export function baseColumns(rows: Raw[]) {
 export function planningModeFromRows(rows: Raw[]): PlanningMode {
   const selectionColumn = baseColumns(rows).selection;
   return rows.some((row) => norm(row[selectionColumn]).startsWith("S")) ? "with-spares" : "titles-only";
+}
+
+export function selectionKind(value: unknown): Point["kind"] {
+  const selection = norm(value);
+  if (["T", "T PANEL", "TITULAR", "TITULARES", "TITULAR PANEL"].includes(selection)) return "Titular";
+  if (selection.startsWith("S")) return "Suplente";
+  return "Otro";
 }
 
 export function forecastMtColumn(rows: Raw[]) {
@@ -162,7 +169,7 @@ export function extractPoints(rows: Raw[]): Point[] {
     const { lat, lng } = coordinates[sourceIndex];
     if (lat === null || lng === null) return;
     const selection = norm(row[fields.selection]);
-    const kind: Point["kind"] = selection === "T" || selection === "T PANEL" ? "Titular" : selection.startsWith("S") ? "Suplente" : "Otro";
+    const kind = selectionKind(selection);
     if (kind === "Otro") return;
     const refId = String(row[fields.refId] ?? sourceIndex + 1);
     points.push({
@@ -1006,7 +1013,7 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     const all = byMt.get(mt) ?? [], titles = all.filter((point) => point.kind === "Titular");
     const days = Object.entries(daily).map(([day, count]) => ({ day: Number(day), count })).sort((a, b) => a.day - b.day);
     const needed = days.reduce((sum, plan) => sum + plan.count, 0);
-    if (!all.length) { notices.push({ type: "warn", text: `${mt}: no hay puntos con coordenadas en la base.` }); return; }
+    if (!all.length) { notices.push({ type: "warn", text: `${mt}: no hay puntos elegibles con ese MT FINAL y coordenadas válidas en la base.` }); return; }
     if (titles.length < needed) notices.push({ type: "warn", text: `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
     const selectedTitles = denseSubset(titles, Math.min(needed, titles.length));
     let remaining = selectedTitles.length;
