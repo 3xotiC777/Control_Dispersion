@@ -88,8 +88,11 @@ export const meters = (a: Pick<Point, "lat" | "lng">, b: Pick<Point, "lat" | "ln
 
 export const column = (rows: Raw[], names: string[]) => {
   const headers = Object.keys(rows[0] ?? {});
-  const cleanNames = names.map(key);
-  return headers.find((header) => cleanNames.includes(key(header)));
+  for (const name of names) {
+    const header = headers.find((candidate) => key(candidate) === key(name));
+    if (header) return header;
+  }
+  return undefined;
 };
 
 export function baseColumns(rows: Raw[]) {

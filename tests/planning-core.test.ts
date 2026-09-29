@@ -259,3 +259,16 @@ test("prefiere RefIDEmbotellador a un código genérico", () => {
   const rows = [{ "CODIGO DN": "otro", RefIDEmbotellador: "5001", "MT FINAL": "MT1", SELECCION: "T", LATITUD: 7.8, LONGITUD: -80.4, PDV: "P1" }];
   assert.equal(extractPoints(rows)[0].refId, "5001");
 });
+
+test("prefiere SELECCION a TIPO aunque TIPO aparezca antes en Excel", () => {
+  const rows = [1, 2].map((index) => ({
+    TIPO: "OFF PREMISE", Zona: "Otra zona", MT: "Otro MT", "MT FINAL": "MT1",
+    LATITUDE: 14.66, LONGITUDE: -90.49 - index * 0.001,
+    PDV: `P${index}`, Codigo: String(index), SELECCION: "T",
+  }));
+  const points = extractPoints(rows);
+  assert.equal(baseColumns(rows).selection, "SELECCION");
+  assert.equal(points.length, 2);
+  assert.ok(points.every((item) => item.kind === "Titular" && item.mt === "MT1"));
+  assert.equal(assign(points, { MT1: { 1: 2 } }).points.filter((item) => item.day === 1).length, 2);
+});
