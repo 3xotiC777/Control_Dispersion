@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import * as XLSX from "xlsx";
-import { assign, baseColumns, extractAssignedPoints, extractForecast, extractPoints, finalizeAssignment, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, runRoadQa, runSmartRoadQa, type Forecast, type Notice, type PlanningMode, type Point, type Raw } from "./planning-core";
+import { assign, baseColumns, column, extractAssignedPoints, extractForecast, extractPoints, finalizeAssignment, forecastMtColumn, key, operationalMt, planningModeFromRows, refreshAverages, requiredRouteColumn, runRoadQa, runSmartRoadQa, validateRouteAssignments, type Forecast, type Notice, type PlanningMode, type PlanningOptions, type Point, type Raw } from "./planning-core";
 
 type WorkerRequest = { id: number; type: "load-base" | "load-forecast" | "load-assigned" | "calculate" | "move" | "bulk-move" | "qa" | "download"; payload?: Record<string, unknown> };
 
@@ -9,6 +9,7 @@ let baseBuffer: ArrayBuffer | null = null;
 let baseCount = 0;
 let forecast: Forecast | null = null;
 let currentPoints: Point[] = [];
+let currentOptions: PlanningOptions = {};
 
 function progress(text: string) {
   self.postMessage({ type: "progress", text });
@@ -26,10 +27,12 @@ async function handleRequest(request: WorkerRequest) {
     const buffer = payload.buffer as ArrayBuffer;
     const rows = parseWorkbook(buffer);
     baseColumns(rows);
+    if (payload.groupByRoute) requiredRouteColumn(rows);
     baseBuffer = buffer;
     baseCount = rows.length;
     currentPoints = [];
-    return { count: rows.length };
+    currentOptions = {};
+    return { count: rows.length, hasRoute: Boolean(column(rows, ["RUTA"])) };
   }
   if (request.type === "load-assigned") {
     progress("Leyendo la base asignada en segundo plano…");
@@ -39,6 +42,7 @@ async function handleRequest(request: WorkerRequest) {
     baseCount = rows.length;
     const extracted = extractAssignedPoints(rows);
     currentPoints = extracted.points;
+    currentOptions = {};
     forecast = extracted.forecast;
     return {
       count: rows.length,
@@ -61,23 +65,26 @@ async function handleRequest(request: WorkerRequest) {
     progress(`Preparando ${baseCount.toLocaleString()} registros…`);
     const sourceRows = parseWorkbook(baseBuffer);
     const mode = planningModeFromRows(sourceRows);
-    const sourcePoints = extractPoints(sourceRows);
-    progress("Agrupando titulares según el forecast…");
-    const initial = assign(sourcePoints, forecast, mode, { finalize: false });
+    const options: PlanningOptions = { groupByRoute: Boolean(payload.groupByRoute) };
+    const sourcePoints = extractPoints(sourceRows, options);
+    progress(options.groupByRoute ? "Organizando rutas y titulares según el forecast…" : "Agrupando titulares según el forecast…");
+    const initial = assign(sourcePoints, forecast, mode, { ...options, finalize: false });
     progress("Detectando cruces que necesitan QA vial…");
-    const smartQa = await runSmartRoadQa(initial.points, progress);
+    const smartQa = await runSmartRoadQa(initial.points, progress, options);
     progress(mode === "with-spares" ? "Ordenando días y asignando suplentes…" : "Ordenando el recorrido para reducir regresos entre zonas…");
-    const finalized = finalizeAssignment(smartQa.points, forecast, mode);
+    const finalized = finalizeAssignment(smartQa.points, forecast, mode, undefined, options);
     currentPoints = finalized.points;
+    currentOptions = options;
     return { points: finalized.points, notices: [...finalized.notices, ...smartQa.notices, ...initial.notices], mode: initial.mode };
   }
   if (request.type === "move") {
     const id = String(payload.id), newDay = payload.day == null ? null : Number(payload.day);
     const selected = currentPoints.find((point) => point.id === id);
     if (!selected) throw new Error("No se encontró el punto seleccionado.");
+    if (currentOptions.groupByRoute) validateRouteAssignments(currentPoints.map((point) => point.id === id ? { ...point, day: newDay } : point));
     const oldKey = selected.day ? `${operationalMt(selected)}\u0000${selected.day}` : "";
     selected.day = newDay;
-    refreshAverages(currentPoints);
+    refreshAverages(currentPoints, currentOptions);
     const newKey = selected.day ? `${operationalMt(selected)}\u0000${selected.day}` : "";
     const updates = currentPoints.filter((point) => point.id === id || (point.day && (`${operationalMt(point)}\u0000${point.day}` === oldKey || `${operationalMt(point)}\u0000${point.day}` === newKey)));
     return { updates, notices: [{ type: "info", text: "Cambio manual aplicado. Revisa el indicador de forecast antes de exportar." }] as Notice[] };
@@ -86,6 +93,7 @@ async function handleRequest(request: WorkerRequest) {
     const ids = new Set((payload.ids as string[] | undefined) ?? []);
     const newDay = payload.day == null ? null : Number(payload.day);
     if (!ids.size) throw new Error("No hay puntos seleccionados.");
+    if (currentOptions.groupByRoute) validateRouteAssignments(currentPoints.map((point) => ids.has(point.id) ? { ...point, day: newDay } : point));
     const affectedGroups = new Set<string>();
     let changed = 0;
     currentPoints.forEach((point) => {
@@ -96,17 +104,17 @@ async function handleRequest(request: WorkerRequest) {
       changed++;
     });
     if (!changed) throw new Error("Los puntos seleccionados ya no están disponibles.");
-    refreshAverages(currentPoints);
+    refreshAverages(currentPoints, currentOptions);
     const updates = currentPoints.filter((point) => ids.has(point.id) || (point.day && affectedGroups.has(`${operationalMt(point)}\u0000${point.day}`)));
     return { updates, notices: [{ type: "info", text: `${changed} puntos cambiaron en bloque al día ${newDay ?? "sin asignar"}. Revisa el cumplimiento del forecast antes de exportar.` }] as Notice[] };
   }
   if (request.type === "qa") {
     if (!forecast) throw new Error("No hay forecast cargado.");
     progress("Consultando carreteras y optimizando el MT…");
-    const mt = String(payload.mt), qa = await runRoadQa(currentPoints, mt);
+    const mt = String(payload.mt), qa = await runRoadQa(currentPoints, mt, currentOptions);
     progress("Aplicando la secuencia geográfica final…");
     const mode: PlanningMode = currentPoints.some((point) => point.kind === "Suplente") ? "with-spares" : "titles-only";
-    const finalized = finalizeAssignment(qa.points, forecast, mode, mt);
+    const finalized = finalizeAssignment(qa.points, forecast, mode, mt, currentOptions);
     currentPoints = finalized.points;
     return { points: finalized.points, notices: [...qa.notices, ...finalized.notices] };
   }

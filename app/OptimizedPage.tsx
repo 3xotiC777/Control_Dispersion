@@ -77,7 +77,8 @@ export default function OptimizedPage() {
   const filtersRef = useRef<HTMLElement | null>(null);
   const pendingRef = useRef(new Map<number, PendingRequest>());
   const requestIdRef = useRef(0);
-  const [baseInfo, setBaseInfo] = useState<{ name: string; count: number } | null>(null);
+  const [baseInfo, setBaseInfo] = useState<{ name: string; count: number; hasRoute: boolean } | null>(null);
+  const [groupByRoute, setGroupByRoute] = useState(false);
   const [forecast, setForecast] = useState<Forecast | null>(null);
   const [points, setPoints] = useState<Point[]>([]);
   const [planningMode, setPlanningMode] = useState<PlanningMode | null>(null);
@@ -148,8 +149,8 @@ export default function OptimizedPage() {
     try {
       const buffer = await file.arrayBuffer();
       if (type === "base") {
-        const result = await workerCall("load-base", { buffer }, [buffer]) as { count: number };
-        setBaseInfo({ name: file.name, count: result.count });
+        const result = await workerCall("load-base", { buffer, groupByRoute }, [buffer]) as { count: number; hasRoute: boolean };
+        setBaseInfo({ name: file.name, count: result.count, hasRoute: result.hasRoute });
       } else {
         const result = await workerCall("load-forecast", { buffer }, [buffer]) as { forecast: Forecast };
         setForecast(result.forecast);
@@ -169,7 +170,7 @@ export default function OptimizedPage() {
     if (!baseInfo || !forecast || busy) return;
     setBusy("calculate"); setError(""); setProgress(`Optimizando ${baseInfo.count.toLocaleString()} registros…`);
     try {
-      const result = await workerCall("calculate") as { points: Point[]; notices: Notice[]; mode: PlanningMode };
+      const result = await workerCall("calculate", { groupByRoute }) as { points: Point[]; notices: Notice[]; mode: PlanningMode };
       setPoints(result.points); setPlanningMode(result.mode); setNotices(result.notices); setSelected(null); setSelectedIds(new Set()); setMultiSelect(false); setBulkDay(""); setPlanningVersion((version) => version + 1);
     } catch (exception) { setError(exception instanceof Error ? exception.message : "No fue posible calcular la asignación."); }
     finally { setBusy(null); setProgress(""); }
@@ -382,6 +383,7 @@ export default function OptimizedPage() {
         </button>
       </div>
       {uploadTab === "new" ? (
+        <>
         <section className="upload-grid">
           <label className={baseInfo ? "file-card loaded" : "file-card"}>
             <div className="file-card-top"><i><Database size={21} /></i>{baseInfo && <span className="ready-badge"><Check size={13} /> Listo</span>}</div>
@@ -397,10 +399,16 @@ export default function OptimizedPage() {
             <small>MT FINAL en filas · días en columnas</small>
             <input disabled={Boolean(busy)} type="file" accept=".xlsx,.xls" onChange={(event) => handleFile(event, "forecast")} />
           </label>
-          <button className="calculate" onClick={calculate} disabled={!baseInfo || !forecast || Boolean(busy)}>
+          <button className="calculate" onClick={calculate} disabled={!baseInfo || !forecast || Boolean(busy) || (groupByRoute && !baseInfo.hasRoute)}>
             {busy === "calculate" ? <LoaderCircle className="spin" size={18} /> : <UploadCloud size={18} />} {busy === "calculate" ? "Calculando sin bloquear…" : "Calcular planificación"}
           </button>
         </section>
+        <div className={`planning-option${groupByRoute ? " active" : ""}`}>
+          <label><input type="checkbox" checked={groupByRoute} disabled={Boolean(busy)} onChange={(event) => { setGroupByRoute(event.target.checked); setError(""); }} /><Route size={18} /><span><strong>Agrupar por rutas</strong><small>Completa cada ruta en días consecutivos y asigna suplentes de la misma RUTA. Se aplica al calcular la planificación.</small></span></label>
+          {groupByRoute && <p>La base debe incluir la columna RUTA. El forecast conserva sus columnas actuales.</p>}
+          {groupByRoute && baseInfo && !baseInfo.hasRoute && <p className="route-required" role="alert">No se encontró la columna “RUTA” en la base de puntos. Carga una base con RUTA o desactiva esta opción.</p>}
+        </div>
+        </>
       ) : (
         <DataExplorer />
       )}
@@ -450,6 +458,6 @@ export default function OptimizedPage() {
     </div>}
     {uploadTab === "new" && notices.map((notice, index) => <p className={`message ${notice.type}`} key={`${notice.type}-${index}`}>{notice.text}</p>)}
     {uploadTab === "new" && !!bulkPoints.length && <aside className="editor bulk-editor animate-pop-in"><button className="editor-close" aria-label="Cerrar selección múltiple" onClick={clearBulkSelection}><X size={20} /></button><span className="section-kicker">SELECCIÓN MÚLTIPLE</span><h3>{bulkPoints.length.toLocaleString()} puntos seleccionados</h3><p>{bulkSummary.titles} titulares · {bulkSummary.spares} suplentes<br />{bulkSummary.mts} MT FINAL involucrado{bulkSummary.mts === 1 ? "" : "s"}</p><label><span>Mover todos al día</span><select value={bulkDay} onChange={(event) => setBulkDay(event.target.value)} disabled={busy === "bulk-move" || !bulkDays.length}><option value="">Selecciona un día</option>{bulkDays.map((day) => <option key={day} value={day}>Día {day}</option>)}</select></label><button className="bulk-apply" onClick={moveBulkSelection} disabled={!bulkDay || busy === "bulk-move"}>{busy === "bulk-move" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} {busy === "bulk-move" ? "Aplicando cambios…" : `Mover ${bulkPoints.length.toLocaleString()} puntos`}</button><button className="bulk-clear" onClick={clearBulkSelection} disabled={busy === "bulk-move"}><Trash2 size={15} /> Limpiar selección</button>{!bulkDays.length && <small>No hay días comunes entre los MT seleccionados. Filtra un solo MT FINAL y vuelve a seleccionar.</small>}<small>El cambio se reflejará en la tabla y en el Excel descargado.</small></aside>}
-    {uploadTab === "new" && selected && <aside className="editor animate-pop-in"><button className="editor-close" aria-label="Cerrar" onClick={() => setSelected(null)}><X size={20} /></button><span className="section-kicker">AJUSTE MANUAL</span><h3>{selected.name}</h3><p>RefID: {selected.refId}<br />{operationalMt(selected)} · {selected.kind} · {selected.selection}</p><label><span>Asignar a</span><select disabled={busy === "move"} value={selected.day ?? ""} onChange={(event) => moveSelected(event.target.value ? Number(event.target.value) : null)}><option value="">Sin asignar</option>{(() => { const mtDays = Object.keys(forecast?.[operationalMt(selected)] ?? {}).map(Number).filter((d) => d > 0); const options = [...new Set([...mtDays, ...availableDays])].sort((a, b) => a - b); return options.map((day) => <option key={day} value={day}>Día {day}</option>); })()}</select></label><small>{busy === "move" ? "Aplicando cambio…" : "Este ajuste se guardará en el Excel descargado."}</small></aside>}
+    {uploadTab === "new" && selected && <aside className="editor animate-pop-in"><button className="editor-close" aria-label="Cerrar" onClick={() => setSelected(null)}><X size={20} /></button><span className="section-kicker">AJUSTE MANUAL</span><h3>{selected.name}</h3><p>RefID: {selected.refId}<br />{operationalMt(selected)} · {selected.kind} · {selected.selection}{selected.route && <><br />Ruta: {selected.route}</>}</p><label><span>Asignar a</span><select disabled={busy === "move"} value={selected.day ?? ""} onChange={(event) => moveSelected(event.target.value ? Number(event.target.value) : null)}><option value="">Sin asignar</option>{(() => { const mtDays = Object.keys(forecast?.[operationalMt(selected)] ?? {}).map(Number).filter((d) => d > 0); const options = [...new Set([...mtDays, ...availableDays])].sort((a, b) => a - b); return options.map((day) => <option key={day} value={day}>Día {day}</option>); })()}</select></label><small>{busy === "move" ? "Aplicando cambio…" : "Este ajuste se guardará en el Excel descargado."}</small></aside>}
   </div></main>;
 }

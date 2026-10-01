@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assign, baseColumns, extractPoints, forecastToleranceFor, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refineClusterDispersion, sequenceDaysByProximity, type Point } from "../app/planning-core";
+import { assign, baseColumns, extractPoints, forecastToleranceFor, improveDayGroupsWithinForecastTolerance, planningModeFromRows, refreshAverages, refineClusterDispersion, runRoadQa, sequenceDaysByProximity, validateRouteAssignments, type Point } from "../app/planning-core";
 
 function point(index: number, lng: number, kind: Point["kind"] = "Titular"): Point {
   return {
@@ -271,4 +271,84 @@ test("prefiere SELECCION a TIPO aunque TIPO aparezca antes en Excel", () => {
   assert.equal(points.length, 2);
   assert.ok(points.every((item) => item.kind === "Titular" && item.mt === "MT1"));
   assert.equal(assign(points, { MT1: { 1: 2 } }).points.filter((item) => item.day === 1).length, 2);
+});
+
+test("RUTA solo es obligatoria cuando se activa Agrupar por rutas", () => {
+  const row = { "MT FINAL": "MT1", SELECCION: "T", LATITUD: 1, LONGITUD: 1, PDV: "P1", RefID: "1", "TIPO DE RUTA": "tradicional" };
+  assert.equal(extractPoints([row]).length, 1);
+  assert.throws(() => extractPoints([row], { groupByRoute: true }), /No se encontró la columna "RUTA"/);
+  assert.throws(() => extractPoints([{ ...row, RUTA: "" }], { groupByRoute: true }), /RUTA está vacía/);
+});
+
+test("conserva grupos de ruta completos usando el margen del forecast", () => {
+  const titles = Array.from({ length: 16 }, (_, index) => ({ ...point(index, index * 0.0001), route: index < 7 ? "A" : "B" }));
+  const result = assign(titles, { MT1: { 1: 8, 2: 8 } }, "titles-only", { groupByRoute: true });
+  for (const route of ["A", "B"]) assert.equal(new Set(result.points.filter((item) => item.route === route).map((item) => item.day)).size, 1);
+  assert.deepEqual([1, 2].map((day) => result.points.filter((item) => item.day === day).length).sort(), [7, 9]);
+});
+
+test("una ruta grande ocupa jornadas consecutivas aunque sus puntos se mezclen espacialmente", () => {
+  const titles = Array.from({ length: 18 }, (_, index) => ({ ...point(index, (index % 3) * 0.001), route: index < 12 ? "A" : "B" }));
+  const forecast = { MT1: { 1: 6, 4: 6, 7: 6 } };
+  const result = assign(titles, forecast, "titles-only", { groupByRoute: true });
+  const activeDays = [1, 4, 7];
+  for (const route of ["A", "B"]) {
+    const occupied = activeDays.map((day, index) => result.points.some((item) => item.route === route && item.day === day) ? index : -1).filter((index) => index >= 0);
+    assert.equal(occupied.length, occupied.at(-1)! - occupied[0] + 1);
+  }
+  activeDays.forEach((day) => assert.ok(Math.abs(result.points.filter((item) => item.day === day).length - 6) <= forecastToleranceFor(6)));
+  assert.equal(result.points.filter((item) => item.day !== null).length, 18);
+});
+
+test("un día con dos rutas recibe tres suplentes por titular de cada ruta", () => {
+  const titles = [{ ...point(1, 0), route: "A" }, { ...point(2, 0.01), route: "B" }];
+  const spares = ["A", "B"].flatMap((route, routeIndex) => Array.from({ length: 4 }, (_, index) => ({ ...point(10 + routeIndex * 10 + index, index * 0.00001, "Suplente"), route, mt: "OTRO MT" })));
+  const result = assign([...titles, ...spares], { MT1: { 1: 2 } }, "with-spares", { groupByRoute: true });
+  for (const route of ["A", "B"]) assert.equal(result.points.filter((item) => item.kind === "Suplente" && item.route === route && item.day === 1 && item.assignedMt === "MT1").length, 3);
+  assert.doesNotThrow(() => validateRouteAssignments(result.points));
+});
+
+test("el radio ampliado también exige la misma ruta y no sustituye una ruta sin suplentes", () => {
+  const titles = [{ ...point(1, 0), route: "A" }, { ...point(2, 0.001), route: "C" }];
+  const spares = ["A", "B"].flatMap((route, routeIndex) => Array.from({ length: 3 }, (_, index) => ({ ...point(10 + routeIndex * 10 + index, route === "A" ? 1 : 0.001, "Suplente"), route })));
+  const result = assign([...titles, ...spares], { MT1: { 1: 2 } }, "with-spares", { groupByRoute: true });
+  assert.equal(result.points.filter((item) => item.kind === "Suplente" && item.route === "A" && item.day === 1).length, 3);
+  assert.ok(result.points.filter((item) => item.route === "B").every((item) => item.day === null));
+  assert.ok(result.notices.some((notice) => notice.type === "warn" && notice.text.includes("ruta C")));
+});
+
+test("un cambio manual conserva la relación de ruta y mide al titular compatible", () => {
+  const titles = [{ ...point(1, 0), route: "A", day: 1, assignedMt: "MT1" }, { ...point(2, 0.01), route: "B", day: 1, assignedMt: "MT1" }];
+  const spare = { ...point(3, 0.01, "Suplente"), route: "A", day: 1, assignedMt: "MT1" };
+  const input = [...titles, spare];
+  refreshAverages(input, { groupByRoute: true });
+  assert.ok(spare.avgMeters! > 1000);
+  assert.throws(() => validateRouteAssignments(input.map((item) => item.id === "1" ? { ...item, day: 2 } : item)), /misma ruta/);
+  assert.doesNotThrow(() => validateRouteAssignments(input.map((item) => item.route === "A" ? { ...item, day: 2 } : item)));
+});
+
+test("el QA vial no intercambia titulares entre rutas diferentes", async (context) => {
+  const matrix = [[0, 1000, 1, 1], [1000, 0, 1, 1], [1, 1, 0, 1000], [1, 1, 1000, 0]];
+  context.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ code: "Ok", durations: matrix }), { status: 200 }));
+  const titles = Array.from({ length: 4 }, (_, index) => ({ ...point(index, index * 0.001), route: index < 2 ? "A" : "B", day: index < 2 ? 1 : 2, assignedMt: "MT1" }));
+  const result = await runRoadQa(titles, "MT1", { groupByRoute: true });
+  assert.deepEqual(result.points.map((item) => item.day), [1, 1, 2, 2]);
+});
+
+test("sin activar la opción, la columna RUTA no cambia la planificación", () => {
+  const titles = Array.from({ length: 8 }, (_, index) => point(index, index < 4 ? index * 0.001 : 1 + index * 0.001));
+  const forecast = { MT1: { 1: 4, 2: 4 } };
+  const baseline = assign(titles, forecast);
+  const withRoutes = assign(titles.map((item, index) => ({ ...item, route: index % 2 ? "A" : "B" })), forecast, undefined, { groupByRoute: false });
+  assert.deepEqual(withRoutes.points.map((item) => item.day), baseline.points.map((item) => item.day));
+});
+
+test("reconoce el nombre del PDV y las prioridades especiales de RD sin columna PAIS", () => {
+  const rows = ["S PANEL", "S1", "S2", "S3", "S4", "S ON", "S ORO"].map((selection, index) => ({
+    "MT FINAL": "MT1", SELECCION: selection, RUTA: 310, LATITUD: 18.45, LONGITUD: -69.93,
+    "CLIENTE FIJO30%": "NO", "NAME Cliente (PDV)": `Colmado ${index}`, RefID: String(index),
+  }));
+  const points = extractPoints(rows, { groupByRoute: true });
+  assert.equal(points[0].name, "Colmado 0");
+  assert.deepEqual(points.map((item) => item.priorityRank), [0, 1, 2, 3, 4, 5, 6]);
 });

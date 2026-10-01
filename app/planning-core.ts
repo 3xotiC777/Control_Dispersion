@@ -7,6 +7,7 @@ export type Point = {
   name: string;
   mt: string;
   selection: string;
+  route?: string;
   kind: "Titular" | "Suplente" | "Otro";
   priorityRank: number;
   lat: number;
@@ -19,6 +20,7 @@ export type Point = {
 export type Forecast = Record<string, Record<number, number>>;
 export type Notice = { type: "info" | "warn"; text: string };
 export type PlanningMode = "with-spares" | "titles-only";
+export type PlanningOptions = { groupByRoute?: boolean };
 
 export const MAX_SUPPLEMENT_DISTANCE_METERS = 15000;
 export const DAY_FORECAST_TOLERANCE = 5;
@@ -103,7 +105,7 @@ export function baseColumns(rows: Raw[]) {
     selection: column(rows, ["SELECCION", "SELECCIONPUNTO", "TIPO", "TIPOPUNTO", "KIND", "CLASE", "CATEGORIA"]) ?? headers.find((h) => key(h).includes("SELECC") || key(h).includes("TIPO")),
     latitude: column(rows, ["LATITUDE", "LATITUD", "LAT", "Y"]) ?? headers.find((h) => key(h).startsWith("LAT")),
     longitude: column(rows, ["LONGITUDE", "LONGITUD", "LON", "LNG", "X"]) ?? headers.find((h) => key(h).startsWith("LON") || key(h).startsWith("LNG")),
-    pdv: column(rows, ["PDV", "NOMBRE", "CLIENTE", "PUNTO", "NAME", "DESCRIPCION", "ESTABLECIMIENTO"]) ?? headers.find((h) => key(h).includes("PDV") || key(h).includes("NOMBRE") || key(h).includes("CLIENTE")),
+    pdv: column(rows, ["PDV", "NAMECLIENTEPDV", "NOMBRE", "CLIENTE", "PUNTO", "NAME", "DESCRIPCION", "ESTABLECIMIENTO"]) ?? headers.find((h) => key(h).includes("PDV") || key(h).includes("NOMBRE") || key(h).includes("CLIENTE")),
     refId: column(rows, ["REFID"]) ?? headers.find((h) => key(h).startsWith("REFID")) ?? column(rows, ["ID", "CODIGO", "COD", "REF", "PUNTOID"]) ?? headers.find((h) => key(h).includes("REF") || key(h).includes("ID") || key(h).includes("COD")),
   };
   const labels: Record<keyof typeof columns, string> = { mt: "MT FINAL", selection: "SELECCION", latitude: "LATITUD", longitude: "LONGITUD", pdv: "PDV", refId: "RefID" };
@@ -122,6 +124,27 @@ export function selectionKind(value: unknown): Point["kind"] {
   if (["T", "T PANEL", "TITULAR", "TITULARES", "TITULAR PANEL"].includes(selection)) return "Titular";
   if (selection.startsWith("S")) return "Suplente";
   return "Otro";
+}
+
+export function requiredRouteColumn(rows: Raw[]) {
+  const route = column(rows, ["RUTA"]);
+  if (!route) throw new Error('No se encontró la columna "RUTA" en la base de puntos. Es obligatoria al activar Agrupar por rutas.');
+  return route;
+}
+
+const pointRoute = (point: Point) => norm(point.route);
+
+function validatePointRoutes(points: Point[]) {
+  const missing = points.find((point) => point.kind !== "Otro" && !pointRoute(point));
+  if (missing) throw new Error(`La columna RUTA está vacía en la fila ${missing.sourceIndex + 2} (RefID ${missing.refId}). Completa las rutas antes de calcular.`);
+}
+
+export function validateRouteAssignments(points: Point[]) {
+  const titleRoutes = new Set(points.filter((point) => point.kind === "Titular" && point.day !== null)
+    .map((point) => `${operationalMt(point)}\u0000${point.day}\u0000${pointRoute(point)}`));
+  const orphan = points.find((point) => point.kind === "Suplente" && point.day !== null
+    && !titleRoutes.has(`${operationalMt(point)}\u0000${point.day}\u0000${pointRoute(point)}`));
+  if (orphan) throw new Error(`El suplente ${orphan.refId}, de la ruta ${orphan.route}, debe quedar con titulares de su misma ruta en el día ${orphan.day}. Incluye sus titulares o suplentes en el cambio.`);
 }
 
 export function forecastMtColumn(rows: Raw[]) {
@@ -154,9 +177,11 @@ function selectionPriority(selection: string, country: string) {
   return exact < 0 ? 99 : exact;
 }
 
-export function extractPoints(rows: Raw[]): Point[] {
+export function extractPoints(rows: Raw[], options: PlanningOptions = {}): Point[] {
   const fields = baseColumns(rows);
+  const routeColumn = options.groupByRoute ? requiredRouteColumn(rows) : column(rows, ["RUTA"]);
   const countryColumn = column(rows, ["PAIS", "COUNTRY"]);
+  const extendedSelectionScheme = rows.some((row) => ["S PANEL", "S ON", "S ORO"].includes(norm(row[fields.selection])));
   let validCoordinates = 0, swappedCoordinates = 0;
   const coordinates = rows.map((row) => {
     const lat = asNumber(row[fields.latitude]), lng = asNumber(row[fields.longitude]);
@@ -182,8 +207,9 @@ export function extractPoints(rows: Raw[]): Point[] {
       name: String(row[fields.pdv] ?? refId),
       mt: String(row[fields.mt] ?? "").trim(),
       selection,
+      route: routeColumn ? String(row[routeColumn] ?? "").trim() : undefined,
       kind,
-      priorityRank: selectionPriority(selection, norm(countryColumn ? row[countryColumn] : "")),
+      priorityRank: selectionPriority(selection, norm(countryColumn ? row[countryColumn] : extendedSelectionScheme ? "DOMINICANA" : "")),
       lat: likelySwapped ? lng : lat,
       lng: likelySwapped ? lat : lng,
       day: null,
@@ -191,6 +217,7 @@ export function extractPoints(rows: Raw[]): Point[] {
       avgMeters: null,
     });
   });
+  if (options.groupByRoute) validatePointRoutes(points);
   return points;
 }
 
@@ -389,7 +416,7 @@ function exactCapacityAssignment(matrix: number[][], medoids: number[], capaciti
   return labels;
 }
 
-export function refineClusterSwaps(labels: number[], matrix: number[][], maxSwaps = 120) {
+export function refineClusterSwaps(labels: number[], matrix: number[][], maxSwaps = 120, canSwap?: (a: number, b: number) => boolean) {
   if (!labels.length) return 0;
   let swaps = 0;
   const clusterCount = Math.max(...labels) + 1;
@@ -399,7 +426,7 @@ export function refineClusterSwaps(labels: number[], matrix: number[][], maxSwap
     let bestA = -1, bestB = -1, bestDelta = -0.001;
     for (let a = 0; a < labels.length; a++) for (let b = a + 1; b < labels.length; b++) {
       const clusterA = labels[a], clusterB = labels[b];
-      if (clusterA === clusterB) continue;
+      if (clusterA === clusterB || (canSwap && !canSwap(a, b))) continue;
       const delta = (sums[b][clusterA] - matrix[b][a] - sums[a][clusterA]) + (sums[a][clusterB] - matrix[a][b] - sums[b][clusterB]);
       if (delta < bestDelta) { bestDelta = delta; bestA = a; bestB = b; }
     }
@@ -806,6 +833,96 @@ function routeDayGroups(groups: SequencedDayGroup[], dailyForecast: Record<numbe
   return order;
 }
 
+function routeTitleTraversal(titles: Point[]) {
+  const routes = new Map<string, Point[]>();
+  titles.forEach((point) => {
+    const route = pointRoute(point), members = routes.get(route) ?? [];
+    members.push(point); routes.set(route, members);
+  });
+  const groups = [...routes.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([, points], index) => ({ day: index + 1, points, medoid: dayGroupMedoid(points) }));
+  const ordered = routeDayGroups(groups, {}, true);
+  return ordered.flatMap((group, index) => {
+    const previous = ordered[index - 1]?.medoid, next = ordered[index + 1]?.medoid;
+    const remaining = [...group.points].sort((left, right) => {
+      const distance = previous ? meters(left, previous) - meters(right, previous)
+        : next ? meters(right, next) - meters(left, next) : 0;
+      return distance || left.id.localeCompare(right.id);
+    });
+    const traversal = [remaining.shift()!];
+    while (remaining.length) {
+      const last = traversal[traversal.length - 1];
+      let closest = 0;
+      for (let candidate = 1; candidate < remaining.length; candidate++) {
+        if (meters(last, remaining[candidate]) < meters(last, remaining[closest])) closest = candidate;
+      }
+      traversal.push(remaining.splice(closest, 1)[0]);
+    }
+    return traversal;
+  });
+}
+
+// Route blocks stay contiguous. Dynamic programming chooses day boundaries
+// within the existing forecast margin, preferring whole routes and compact days.
+function assignTitlesByRoute(titles: Point[], days: Array<{ day: number; count: number }>, needed: number) {
+  if (!titles.length || !days.length) return;
+  const traversal = routeTitleTraversal(titles);
+  const total = Math.min(needed, titles.length);
+  let remaining = total;
+  const plans = days.map((plan) => {
+    const count = Math.min(plan.count, remaining); remaining -= count;
+    return { ...plan, count };
+  }).filter((plan) => plan.count > 0);
+  const lower = plans.map((plan) => Math.max(1, plan.count - forecastToleranceFor(plan.count)));
+  const upper = plans.map((plan) => plan.count + forecastToleranceFor(plan.count));
+  const maximumSize = Math.max(...upper);
+  const splitPenalty = plans.length * 4 + 1;
+  let best: { cost: number; groups: Point[][] } | null = null;
+  for (const ordered of [traversal.slice(0, total), [...traversal].reverse().slice(0, total)]) {
+    const matrix = pointDistanceMatrix(ordered).map((row) => row.map((distance) => distance * distance));
+    let scale = 1;
+    matrix.forEach((row) => row.forEach((distance) => { scale = Math.max(scale, distance); }));
+    const blockCosts = Array.from({ length: total }, () => new Float64Array(maximumSize + 1));
+    for (let start = 0; start < total; start++) {
+      let sum = 0, diameter = 0;
+      for (let size = 1; size <= maximumSize && start + size <= total; size++) {
+        const right = start + size - 1;
+        for (let left = start; left < right; left++) {
+          const distance = matrix[left][right]; sum += distance; diameter = Math.max(diameter, distance);
+        }
+        blockCosts[start][size] = (normalizedDispersion(sum, size) + 2 * diameter) / scale;
+      }
+    }
+    let previous = new Float64Array(total + 1).fill(Infinity);
+    previous[0] = 0;
+    const cuts = plans.map(() => new Int32Array(total + 1).fill(-1));
+    plans.forEach((plan, index) => {
+      const next = new Float64Array(total + 1).fill(Infinity);
+      for (let end = 1; end <= total; end++) for (let size = lower[index]; size <= upper[index] && size <= end; size++) {
+        const start = end - size;
+        if (!Number.isFinite(previous[start])) continue;
+        const split = end < total && pointRoute(ordered[end - 1]) === pointRoute(ordered[end]);
+        const deviation = Math.abs(size - plan.count) / Math.max(1, forecastToleranceFor(plan.count));
+        const cost = previous[start] + blockCosts[start][size] + (split ? splitPenalty : 0) + deviation * 0.005;
+        if (cost < next[end]) { next[end] = cost; cuts[index][end] = start; }
+      }
+      previous = next;
+    });
+    if (!Number.isFinite(previous[total]) || (best && best.cost <= previous[total])) continue;
+    const groups: Point[][] = [];
+    let end = total;
+    for (let index = plans.length - 1; index >= 0; index--) {
+      const start = cuts[index][end];
+      groups.unshift(ordered.slice(start, end)); end = start;
+    }
+    best = { cost: previous[total], groups };
+  }
+  if (!best) throw new Error(`No fue posible distribuir las rutas de ${titles[0].mt} dentro del margen del forecast. Revisa las cantidades por día.`);
+  best.groups.forEach((group, index) => group.forEach((point) => {
+    point.day = plans[index].day; point.assignedMt = point.mt;
+  }));
+}
+
 export function sequenceDaysByProximity(points: Point[], forecast: Forecast, onlyMt?: string) {
   const byMt = new Map<string, Map<number, Point[]>>();
   points.forEach((point) => {
@@ -883,7 +1000,7 @@ export function improveDayGroupsWithinForecastTolerance(points: Point[], forecas
   return { movedPoints: movedIds.size, improvedMts };
 }
 
-export function refreshAverages(points: Point[]) {
+export function refreshAverages(points: Point[], options: PlanningOptions = {}) {
   const groups = new Map<string, { titles: Point[]; members: Point[] }>();
   points.forEach((point) => {
     point.avgMeters = null;
@@ -900,7 +1017,10 @@ export function refreshAverages(points: Point[]) {
       if (point.kind === "Titular") {
         if (titles.length === 1) point.avgMeters = 0;
         else point.avgMeters = titles.reduce((sum, title) => sum + (title.id === point.id ? 0 : meters(point, title)), 0) / (titles.length - 1);
-      } else point.avgMeters = titles.reduce((nearest, title) => Math.min(nearest, meters(point, title)), Infinity);
+      } else {
+        const compatible = options.groupByRoute ? titles.filter((title) => pointRoute(title) === pointRoute(point)) : titles;
+        point.avgMeters = compatible.length ? compatible.reduce((nearest, title) => Math.min(nearest, meters(point, title)), Infinity) : null;
+      }
     });
   });
   return points;
@@ -909,6 +1029,7 @@ export function refreshAverages(points: Point[]) {
 type SpareGroup = {
   mt: string;
   day: number;
+  route?: string;
   titulars: Point[];
   desired: number;
   assigned: Point[];
@@ -919,20 +1040,19 @@ type SpareGroup = {
 const GRID_DEGREES = 0.1;
 const gridKey = (lat: number, lng: number) => `${Math.floor(lat / GRID_DEGREES)}:${Math.floor(lng / GRID_DEGREES)}`;
 
-export function allocateSpares(next: Point[], forecast: Forecast, notices: Notice[]) {
+export function allocateSpares(next: Point[], forecast: Forecast, notices: Notice[], options: PlanningOptions = {}) {
   next.forEach((point) => { if (point.kind === "Suplente") { point.day = null; point.assignedMt = null; point.avgMeters = null; } });
-  const titleGroups = new Map<string, Point[]>();
+  const titleGroups = new Map<string, { mt: string; day: number; route?: string; titulars: Point[] }>();
   next.forEach((point) => {
     if (point.kind !== "Titular" || !point.day || !point.assignedMt || !forecast[point.assignedMt]?.[point.day]) return;
-    const key = groupKey(point.assignedMt, point.day);
-    const titles = titleGroups.get(key) ?? [];
-    titles.push(point);
-    titleGroups.set(key, titles);
+    const route = options.groupByRoute ? pointRoute(point) : undefined;
+    const key = `${groupKey(point.assignedMt, point.day)}${route === undefined ? "" : `\u0000${route}`}`;
+    const group = titleGroups.get(key) ?? { mt: point.assignedMt, day: point.day, route, titulars: [] };
+    group.titulars.push(point); titleGroups.set(key, group);
   });
-  const groups: SpareGroup[] = [...titleGroups.entries()].map(([compound, titulars]) => {
-    const split = compound.lastIndexOf("\u0000"), mt = compound.slice(0, split), day = Number(compound.slice(split + 1));
+  const groups: SpareGroup[] = [...titleGroups.values()].map(({ mt, day, route, titulars }) => {
     return {
-      mt, day, titulars, desired: titulars.length * 3, assigned: [], hasNearby: false,
+      mt, day, route, titulars, desired: titulars.length * 3, assigned: [], hasNearby: false,
       center: { lat: titulars.reduce((sum, point) => sum + point.lat, 0) / titulars.length, lng: titulars.reduce((sum, point) => sum + point.lng, 0) / titulars.length },
     };
   });
@@ -942,6 +1062,11 @@ export function allocateSpares(next: Point[], forecast: Forecast, notices: Notic
     bucket.push(group); groupGrid.set(cell, bucket);
   });
   const spares = next.filter((point) => point.kind === "Suplente");
+  const groupsByRoute = new Map<string, SpareGroup[]>();
+  if (options.groupByRoute) groups.forEach((group) => {
+    const bucket = groupsByRoute.get(group.route!) ?? [];
+    bucket.push(group); groupsByRoute.set(group.route!, bucket);
+  });
   const edges: Array<{ point: Point; group: SpareGroup; distance: number }> = [];
   const candidateLimit = 16;
   spares.forEach((point) => {
@@ -952,10 +1077,11 @@ export function allocateSpares(next: Point[], forecast: Forecast, notices: Notic
       if (bucket) localGroups.push(...bucket);
     }
     const cosine = Math.cos(rad(point.lat));
-    localGroups.map((group) => {
+    const candidates = options.groupByRoute ? groupsByRoute.get(pointRoute(point)) ?? [] : localGroups;
+    candidates.map((group) => {
       const deltaLat = point.lat - group.center.lat, deltaLng = (point.lng - group.center.lng) * cosine;
       return { group, score: deltaLat * deltaLat + deltaLng * deltaLng };
-    }).sort((a, b) => a.score - b.score).slice(0, candidateLimit).forEach(({ group }) => {
+    }).sort((a, b) => a.score - b.score).slice(0, options.groupByRoute ? candidates.length : candidateLimit).forEach(({ group }) => {
       const distance = group.titulars.reduce((nearest, title) => Math.min(nearest, meters(point, title)), Infinity);
       if (distance <= MAX_SUPPLEMENT_DISTANCE_METERS) { group.hasNearby = true; edges.push({ point, group, distance }); }
     });
@@ -969,23 +1095,31 @@ export function allocateSpares(next: Point[], forecast: Forecast, notices: Notic
   const fallbackNotices: string[] = [];
   groups.filter((group) => !group.hasNearby && group.assigned.length < group.desired).forEach((group) => {
     const missing = group.desired - group.assigned.length;
-    const fallback = spares.filter((point) => !usedSpares.has(point.id)).map((point) => ({
+    const fallback = spares.filter((point) => !usedSpares.has(point.id) && (!options.groupByRoute || pointRoute(point) === group.route)).map((point) => ({
       point,
       distance: group.titulars.reduce((nearest, title) => Math.min(nearest, meters(point, title)), Infinity),
     })).sort((a, b) => a.distance - b.distance || a.point.priorityRank - b.point.priorityRank).slice(0, missing);
     fallback.forEach(({ point }) => { point.day = group.day; point.assignedMt = group.mt; group.assigned.push(point); usedSpares.add(point.id); });
-    if (fallback.length) fallbackNotices.push(`${group.mt}, día ${group.day}: no había suplentes a 15 km; se asignaron los ${fallback.length} más cercanos disponibles.`);
+    if (fallback.length) fallbackNotices.push(`${group.mt}, día ${group.day}${group.route ? `, ruta ${group.route}` : ""}: no había suplentes compatibles a 15 km; se asignaron los ${fallback.length} más cercanos disponibles.`);
   });
   fallbackNotices.slice(0, 20).forEach((text) => notices.push({ type: "info", text }));
   if (fallbackNotices.length > 20) notices.push({ type: "info", text: `${fallbackNotices.length - 20} jornadas adicionales usaron suplentes fuera de 15 km. Revisa la tabla de cumplimiento para el detalle.` });
-  const shortages = groups.filter((group) => group.assigned.length < group.desired).map((group) => `${group.mt}, día ${group.day}: ${group.assigned.length}/${group.desired} suplentes disponibles.`);
+  const shortages = groups.filter((group) => group.assigned.length < group.desired).map((group) => `${group.mt}, día ${group.day}${group.route ? `, ruta ${group.route}` : ""}: ${group.assigned.length}/${group.desired} suplentes disponibles.`);
   shortages.slice(0, 30).forEach((text) => notices.push({ type: "warn", text }));
   if (shortages.length > 30) notices.push({ type: "warn", text: `${shortages.length - 30} jornadas adicionales no alcanzaron la relación 1:3. La tabla conserva el detalle completo por MT y día.` });
 }
 
-export function finalizeAssignment(points: Point[], forecast: Forecast, mode: PlanningMode, onlyMt?: string) {
+export function finalizeAssignment(points: Point[], forecast: Forecast, mode: PlanningMode, onlyMt?: string, options: PlanningOptions = {}) {
   const next = points.map((point) => ({ ...point }));
   const notices: Notice[] = [];
+  if (options.groupByRoute) {
+    validatePointRoutes(next);
+    notices.push({ type: "info", text: "Agrupar por rutas activo: cada ruta se completa en días de trabajo consecutivos, con las cantidades dentro del margen del forecast. Los suplentes se asignan únicamente a titulares de su misma RUTA." });
+    if (mode === "with-spares") allocateSpares(next, forecast, notices, options);
+    else notices.push({ type: "info", text: "Modo solo titulares: se usa la cantidad del forecast como guía y no se aplica la relación 1:3." });
+    validateRouteAssignments(next);
+    return { points: refreshAverages(next, options), notices };
+  }
   const flexibility = improveDayGroupsWithinForecastTolerance(next, forecast, onlyMt);
   const sequencing = sequenceDaysByProximity(next, forecast, onlyMt);
   if (sequencing.reorderedGroups) notices.push({
@@ -1006,8 +1140,9 @@ export function finalizeAssignment(points: Point[], forecast: Forecast, mode: Pl
   return { points: refreshAverages(next), notices };
 }
 
-export function assign(points: Point[], forecast: Forecast, detectedMode?: PlanningMode, options: { finalize?: boolean } = {}) {
+export function assign(points: Point[], forecast: Forecast, detectedMode?: PlanningMode, options: PlanningOptions & { finalize?: boolean } = {}) {
   const next = points.map((point) => ({ ...point, day: null, assignedMt: null, avgMeters: null }));
+  if (options.groupByRoute) validatePointRoutes(next);
   const notices: Notice[] = [];
   const mode: PlanningMode = detectedMode ?? (next.some((point) => point.kind === "Suplente") ? "with-spares" : "titles-only");
   const byMt = new Map<string, Point[]>();
@@ -1018,6 +1153,7 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     const needed = days.reduce((sum, plan) => sum + plan.count, 0);
     if (!all.length) { notices.push({ type: "warn", text: `${mt}: no hay puntos elegibles con ese MT FINAL y coordenadas válidas en la base.` }); return; }
     if (titles.length < needed) notices.push({ type: "warn", text: `${mt}: el forecast pide ${needed} titulares y la base tiene ${titles.length}. Se asignaron todos los disponibles.` });
+    if (options.groupByRoute) { assignTitlesByRoute(titles, days, needed); return; }
     const selectedTitles = denseSubset(titles, Math.min(needed, titles.length));
     let remaining = selectedTitles.length;
     const effectiveDays = days.map((plan) => { const count = Math.min(plan.count, remaining); remaining -= count; return { ...plan, count }; }).filter((plan) => plan.count > 0);
@@ -1025,7 +1161,7 @@ export function assign(points: Point[], forecast: Forecast, detectedMode?: Plann
     selectedTitles.forEach((point, index) => { point.day = effectiveDays[labels[index]]?.day ?? null; point.assignedMt = point.day ? mt : null; });
   });
   if (options.finalize === false) return { points: next, notices, mode };
-  const finalized = finalizeAssignment(next, forecast, mode);
+  const finalized = finalizeAssignment(next, forecast, mode, undefined, options);
   return { points: finalized.points, notices: [...finalized.notices, ...notices], mode };
 }
 
@@ -1081,7 +1217,7 @@ function pairwiseDistanceMean(group: Point[]) {
   return pairs ? total / pairs : 0;
 }
 
-function smartQaCandidates(points: Point[]) {
+function smartQaCandidates(points: Point[], options: PlanningOptions = {}) {
   const byMt = new Map<string, Map<number, Point[]>>();
   points.forEach((point) => {
     if (point.kind !== "Titular" || !point.day) return;
@@ -1094,6 +1230,7 @@ function smartQaCandidates(points: Point[]) {
     const mtCandidates: SmartQaCandidate[] = [];
     for (let first = 0; first < groups.length; first++) for (let second = first + 1; second < groups.length; second++) {
       const [dayA, titlesA] = groups[first], [dayB, titlesB] = groups[second];
+      if (options.groupByRoute && !titlesA.some((a) => titlesB.some((b) => pointRoute(a) === pointRoute(b)))) continue;
       if (titlesA.length + titlesB.length > 90) continue;
       const withinA = pairwiseDistanceMean(titlesA), withinB = pairwiseDistanceMean(titlesB);
       const gainA = titlesA.reduce((best, point) => {
@@ -1119,10 +1256,10 @@ function smartQaCandidates(points: Point[]) {
   return candidates.sort((a, b) => b.severity - a.severity).slice(0, 24);
 }
 
-export async function runSmartRoadQa(points: Point[], onProgress?: (text: string) => void) {
+export async function runSmartRoadQa(points: Point[], onProgress?: (text: string) => void, options: PlanningOptions = {}) {
   const next = points.map((point) => ({ ...point }));
   const originalDays = new Map(next.filter((point) => point.kind === "Titular").map((point) => [point.id, point.day]));
-  const candidates = smartQaCandidates(next);
+  const candidates = smartQaCandidates(next, options);
   if (!candidates.length) return {
     points: next,
     notices: [{ type: "info", text: "QA vial automático: no se detectaron cruces espaciales que necesitaran validación por carretera." }] as Notice[],
@@ -1137,7 +1274,7 @@ export async function runSmartRoadQa(points: Point[], onProgress?: (text: string
       const matrix = await roadTimeMatrix(titles);
       const labels = titles.map((point) => point.day === candidate.dayA ? 0 : 1);
       const before = withinClusterMean(labels, matrix);
-      const pairSwaps = refineClusterSwaps(labels, matrix, Math.min(24, titles.length));
+      const pairSwaps = refineClusterSwaps(labels, matrix, Math.min(24, titles.length), options.groupByRoute ? (a, b) => pointRoute(titles[a]) === pointRoute(titles[b]) : undefined);
       const after = withinClusterMean(labels, matrix);
       const improvement = before - after;
       if (pairSwaps > 0 && improvement >= 30 && improvement / Math.max(before, 1) >= 0.02) {
@@ -1161,7 +1298,7 @@ export async function runSmartRoadQa(points: Point[], onProgress?: (text: string
   return { points: next, notices };
 }
 
-export async function runRoadQa(points: Point[], mt: string) {
+export async function runRoadQa(points: Point[], mt: string, options: PlanningOptions = {}) {
   const titles = points.filter((point) => operationalMt(point) === mt && point.kind === "Titular" && point.day);
   if (titles.length < 2) throw new Error(`${mt}: no hay suficientes titulares asignados para ejecutar el QA vial.`);
   const roadMatrix = await roadTimeMatrix(titles);
@@ -1169,7 +1306,7 @@ export async function runRoadQa(points: Point[], mt: string) {
   const dayIndex = new Map(days.map((day, index) => [day, index]));
   const labels = titles.map((point) => dayIndex.get(point.day!)!);
   const beforeSeconds = withinClusterMean(labels, roadMatrix);
-  const swaps = refineClusterSwaps(labels, roadMatrix, Math.min(160, titles.length * 2));
+  const swaps = refineClusterSwaps(labels, roadMatrix, Math.min(160, titles.length * 2), options.groupByRoute ? (a, b) => pointRoute(titles[a]) === pointRoute(titles[b]) : undefined);
   const afterSeconds = withinClusterMean(labels, roadMatrix);
   const changedDays = new Map(titles.map((point, index) => [point.id, days[labels[index]]]));
   const changedPoints = titles.filter((point) => changedDays.get(point.id) !== point.day).length;
